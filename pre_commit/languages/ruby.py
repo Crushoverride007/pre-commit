@@ -2,31 +2,36 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import importlib.resources
 import os.path
 import shutil
 import tarfile
-from typing import Generator
-from typing import Sequence
+from collections.abc import Generator
+from collections.abc import Sequence
+from typing import IO
 
 import pre_commit.constants as C
+from pre_commit import lang_base
 from pre_commit.envcontext import envcontext
 from pre_commit.envcontext import PatchesT
 from pre_commit.envcontext import UNSET
 from pre_commit.envcontext import Var
-from pre_commit.hook import Hook
-from pre_commit.languages import helpers
 from pre_commit.prefix import Prefix
 from pre_commit.util import CalledProcessError
-from pre_commit.util import clean_path_on_failure
-from pre_commit.util import resource_bytesio
 
 ENVIRONMENT_DIR = 'rbenv'
-health_check = helpers.basic_health_check
+health_check = lang_base.basic_health_check
+run_hook = lang_base.basic_run_hook
+
+
+def _resource_bytesio(filename: str) -> IO[bytes]:
+    files = importlib.resources.files('pre_commit.resources')
+    return files.joinpath(filename).open('rb')
 
 
 @functools.lru_cache(maxsize=1)
 def get_default_version() -> str:
-    if all(helpers.exe_exists(exe) for exe in ('ruby', 'gem')):
+    if all(lang_base.exe_exists(exe) for exe in ('ruby', 'gem')):
         return 'system'
     else:
         return C.DEFAULT
@@ -68,19 +73,14 @@ def get_env_patch(
 
 
 @contextlib.contextmanager
-def in_env(
-        prefix: Prefix,
-        language_version: str,
-) -> Generator[None, None, None]:
-    envdir = prefix.path(
-        helpers.environment_dir(ENVIRONMENT_DIR, language_version),
-    )
-    with envcontext(get_env_patch(envdir, language_version)):
+def in_env(prefix: Prefix, version: str) -> Generator[None]:
+    envdir = lang_base.environment_dir(prefix, ENVIRONMENT_DIR, version)
+    with envcontext(get_env_patch(envdir, version)):
         yield
 
 
 def _extract_resource(filename: str, dest: str) -> None:
-    with resource_bytesio(filename) as bio:
+    with _resource_bytesio(filename) as bio:
         with tarfile.open(fileobj=bio) as tf:
             tf.extractall(dest)
 
@@ -89,14 +89,14 @@ def _install_rbenv(
         prefix: Prefix,
         version: str,
 ) -> None:  # pragma: win32 no cover
-    directory = helpers.environment_dir(ENVIRONMENT_DIR, version)
+    envdir = lang_base.environment_dir(prefix, ENVIRONMENT_DIR, version)
 
     _extract_resource('rbenv.tar.gz', prefix.path('.'))
-    shutil.move(prefix.path('rbenv'), prefix.path(directory))
+    shutil.move(prefix.path('rbenv'), envdir)
 
     # Only install ruby-build if the version is specified
     if version != C.DEFAULT:
-        plugins_dir = prefix.path(directory, 'plugins')
+        plugins_dir = os.path.join(envdir, 'plugins')
         _extract_resource('ruby-download.tar.gz', plugins_dir)
         _extract_resource('ruby-build.tar.gz', plugins_dir)
 
@@ -106,48 +106,40 @@ def _install_ruby(
         version: str,
 ) -> None:  # pragma: win32 no cover
     try:
-        helpers.run_setup_cmd(prefix, ('rbenv', 'download', version))
+        lang_base.setup_cmd(prefix, ('rbenv', 'download', version))
     except CalledProcessError:  # pragma: no cover (usually find with download)
         # Failed to download from mirror for some reason, build it instead
-        helpers.run_setup_cmd(prefix, ('rbenv', 'install', version))
+        lang_base.setup_cmd(prefix, ('rbenv', 'install', version))
 
 
 def install_environment(
         prefix: Prefix, version: str, additional_dependencies: Sequence[str],
 ) -> None:
-    additional_dependencies = tuple(additional_dependencies)
-    directory = helpers.environment_dir(ENVIRONMENT_DIR, version)
-    with clean_path_on_failure(prefix.path(directory)):
-        if version != 'system':  # pragma: win32 no cover
-            _install_rbenv(prefix, version)
-            with in_env(prefix, version):
-                # Need to call this before installing so rbenv's directories
-                # are set up
-                helpers.run_setup_cmd(prefix, ('rbenv', 'init', '-'))
-                if version != C.DEFAULT:
-                    _install_ruby(prefix, version)
-                # Need to call this after installing to set up the shims
-                helpers.run_setup_cmd(prefix, ('rbenv', 'rehash'))
+    envdir = lang_base.environment_dir(prefix, ENVIRONMENT_DIR, version)
 
+    if version != 'system':  # pragma: win32 no cover
+        _install_rbenv(prefix, version)
         with in_env(prefix, version):
-            helpers.run_setup_cmd(
-                prefix, ('gem', 'build', *prefix.star('.gemspec')),
-            )
-            helpers.run_setup_cmd(
-                prefix,
-                (
-                    'gem', 'install',
-                    '--no-document', '--no-format-executable',
-                    '--no-user-install',
-                    *prefix.star('.gem'), *additional_dependencies,
-                ),
-            )
+            # Need to call this before installing so rbenv's directories
+            # are set up
+            lang_base.setup_cmd(prefix, ('rbenv', 'init', '-'))
+            if version != C.DEFAULT:
+                _install_ruby(prefix, version)
+            # Need to call this after installing to set up the shims
+            lang_base.setup_cmd(prefix, ('rbenv', 'rehash'))
 
-
-def run_hook(
-        hook: Hook,
-        file_args: Sequence[str],
-        color: bool,
-) -> tuple[int, bytes]:
-    with in_env(hook.prefix, hook.language_version):
-        return helpers.run_xargs(hook, hook.cmd, file_args, color=color)
+    with in_env(prefix, version):
+        lang_base.setup_cmd(
+            prefix, ('gem', 'build', *prefix.star('.gemspec')),
+        )
+        lang_base.setup_cmd(
+            prefix,
+            (
+                'gem', 'install',
+                '--no-document', '--no-format-executable',
+                '--no-user-install',
+                '--install-dir', os.path.join(envdir, 'gems'),
+                '--bindir', os.path.join(envdir, 'gems', 'bin'),
+                *prefix.star('.gem'), *additional_dependencies,
+            ),
+        )

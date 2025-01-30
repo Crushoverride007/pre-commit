@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
-from typing import Sequence
+from collections.abc import Sequence
 
 
 # This is a script for generating the tarred resources for git repo
@@ -17,7 +17,7 @@ from typing import Sequence
 
 REPOS = (
     ('rbenv', 'https://github.com/rbenv/rbenv', '38e1fbb'),
-    ('ruby-build', 'https://github.com/rbenv/ruby-build', '2004fd7'),
+    ('ruby-build', 'https://github.com/rbenv/ruby-build', 'ed384c8'),
     (
         'ruby-download',
         'https://github.com/garnieretienne/rvm-download',
@@ -57,8 +57,7 @@ def make_archive(name: str, repo: str, ref: str, destdir: str) -> str:
         arcs.sort()
 
         with gzip.GzipFile(output_path, 'wb', mtime=0) as gzipf:
-            # https://github.com/python/typeshed/issues/5491
-            with tarfile.open(fileobj=gzipf, mode='w') as tf:  # type: ignore
+            with tarfile.open(fileobj=gzipf, mode='w') as tf:
                 for arcname, abspath in arcs:
                     tf.add(
                         abspath,

@@ -4,7 +4,7 @@ import os.path
 import shlex
 import sys
 import time
-from typing import MutableMapping
+from collections.abc import MutableMapping
 from unittest import mock
 
 import pytest
@@ -293,7 +293,7 @@ def test_verbose_duration(cap_out, store, in_git_dir, t1, t2, expected):
     write_config('.', {'repo': 'meta', 'hooks': [{'id': 'identity'}]})
     cmd_output('git', 'add', '.')
     opts = run_opts(verbose=True)
-    with mock.patch.object(time, 'time', side_effect=(t1, t2)):
+    with mock.patch.object(time, 'monotonic', side_effect=(t1, t2)):
         ret, printed = _do_run(cap_out, store, str(in_git_dir), opts)
     assert ret == 0
     assert expected in printed
@@ -354,13 +354,13 @@ def test_show_diff_on_failure(
         ({'hook': 'bash_hook'}, (b'Bash hook', b'Passed'), 0, True),
         (
             {'hook': 'nope'},
-            (b'No hook with id `nope` in stage `commit`',),
+            (b'No hook with id `nope` in stage `pre-commit`',),
             1,
             True,
         ),
         (
-            {'hook': 'nope', 'hook_stage': 'push'},
-            (b'No hook with id `nope` in stage `push`',),
+            {'hook': 'nope', 'hook_stage': 'pre-push'},
+            (b'No hook with id `nope` in stage `pre-push`',),
             1,
             True,
         ),
@@ -536,6 +536,13 @@ def test_merge_conflict(cap_out, store, in_merge_conflict):
     assert b'Unmerged files.  Resolve before committing.' in printed
 
 
+def test_files_during_merge_conflict(cap_out, store, in_merge_conflict):
+    opts = run_opts(files=['placeholder'])
+    ret, printed = _do_run(cap_out, store, in_merge_conflict, opts)
+    assert ret == 0
+    assert b'Bash hook' in printed
+
+
 def test_merge_conflict_modified(cap_out, store, in_merge_conflict):
     # Touch another file so we have unstaged non-conflicting things
     assert os.path.exists('placeholder')
@@ -554,6 +561,16 @@ def test_merge_conflict_resolved(cap_out, store, in_merge_conflict):
             b'Checking merge-conflict files only.', b'Bash hook', b'Passed',
     ):
         assert msg in printed
+
+
+def test_rebase(cap_out, store, repo_with_passing_hook):
+    args = run_opts(pre_rebase_upstream='master', pre_rebase_branch='topic')
+    environ: MutableMapping[str, str] = {}
+    ret, printed = _do_run(
+        cap_out, store, repo_with_passing_hook, args, environ,
+    )
+    assert environ['PRE_COMMIT_PRE_REBASE_UPSTREAM'] == 'master'
+    assert environ['PRE_COMMIT_PRE_REBASE_BRANCH'] == 'topic'
 
 
 @pytest.mark.parametrize(
@@ -635,6 +652,32 @@ def test_skip_bypasses_installation(cap_out, store, repo_with_passing_hook):
     assert ret == 0
 
 
+def test_skip_alias_bypasses_installation(
+        cap_out, store, repo_with_passing_hook,
+):
+    config = {
+        'repo': 'local',
+        'hooks': [
+            {
+                'id': 'skipme',
+                'name': 'skipme-1',
+                'alias': 'skipme-1',
+                'entry': 'skipme',
+                'language': 'python',
+                'additional_dependencies': ['/pre-commit-does-not-exist'],
+            },
+        ],
+    }
+    add_config_to_repo(repo_with_passing_hook, config)
+
+    ret, printed = _do_run(
+        cap_out, store, repo_with_passing_hook,
+        run_opts(all_files=True),
+        {'SKIP': 'skipme-1'},
+    )
+    assert ret == 0
+
+
 def test_hook_id_not_in_non_verbose_output(
         cap_out, store, repo_with_passing_hook,
 ):
@@ -685,7 +728,7 @@ def test_non_ascii_hook_id(repo_with_passing_hook, tempdir_factory):
     with cwd(repo_with_passing_hook):
         _, stdout, _ = cmd_output_mocked_pre_commit_home(
             sys.executable, '-m', 'pre_commit.main', 'run', '☃',
-            retcode=None, tempdir_factory=tempdir_factory,
+            check=False, tempdir_factory=tempdir_factory,
         )
         assert 'UnicodeDecodeError' not in stdout
         # Doesn't actually happen, but a reasonable assertion
@@ -704,7 +747,7 @@ def test_stdout_write_bug_py26(repo_with_failing_hook, store, tempdir_factory):
         _, out = git_commit(
             fn=cmd_output_mocked_pre_commit_home,
             tempdir_factory=tempdir_factory,
-            retcode=None,
+            check=False,
         )
         assert 'UnicodeEncodeError' not in out
         # Doesn't actually happen, but a reasonable assertion
@@ -733,6 +776,47 @@ def test_lots_of_files(store, tempdir_factory):
         )
 
 
+def test_no_textconv(cap_out, store, repo_with_passing_hook):
+    # git textconv filters can hide changes from hooks
+    with open('.gitattributes', 'w') as fp:
+        fp.write('*.jpeg diff=empty\n')
+
+    with open('.git/config', 'a') as fp:
+        fp.write('[diff "empty"]\n')
+        fp.write('textconv = "true"\n')
+
+    config = {
+        'repo': 'local',
+        'hooks': [
+            {
+                'id': 'extend-jpeg',
+                'name': 'extend-jpeg',
+                'language': 'system',
+                'entry': (
+                    f'{shlex.quote(sys.executable)} -c "import sys; '
+                    'open(sys.argv[1], \'ab\').write(b\'\\x00\')"'
+                ),
+                'types': ['jpeg'],
+            },
+        ],
+    }
+    add_config_to_repo(repo_with_passing_hook, config)
+
+    stage_a_file('example.jpeg')
+
+    _test_run(
+        cap_out,
+        store,
+        repo_with_passing_hook,
+        {},
+        (
+            b'Failed',
+        ),
+        expected_ret=1,
+        stage=False,
+    )
+
+
 def test_stages(cap_out, store, repo_with_passing_hook):
     config = {
         'repo': 'local',
@@ -744,7 +828,7 @@ def test_stages(cap_out, store, repo_with_passing_hook):
                 'language': 'pygrep',
                 'stages': [stage],
             }
-            for i, stage in enumerate(('commit', 'push', 'manual'), 1)
+            for i, stage in enumerate(('pre-commit', 'pre-push', 'manual'), 1)
         ],
     }
     add_config_to_repo(repo_with_passing_hook, config)
@@ -759,8 +843,8 @@ def test_stages(cap_out, store, repo_with_passing_hook):
         assert printed.count(b'hook ') == 1
         return printed
 
-    assert _run_for_stage('commit').startswith(b'hook 1...')
-    assert _run_for_stage('push').startswith(b'hook 2...')
+    assert _run_for_stage('pre-commit').startswith(b'hook 1...')
+    assert _run_for_stage('pre-push').startswith(b'hook 2...')
     assert _run_for_stage('manual').startswith(b'hook 3...')
 
 
@@ -1004,6 +1088,22 @@ def test_fail_fast_per_hook(cap_out, store, repo_with_failing_hook):
     assert printed.count(b'Failing hook') == 1
 
 
+def test_fail_fast_not_prev_failures(cap_out, store, repo_with_failing_hook):
+    with modify_config() as config:
+        config['repos'].append({
+            'repo': 'meta',
+            'hooks': [
+                {'id': 'identity', 'fail_fast': True},
+                {'id': 'identity', 'name': 'run me!'},
+            ],
+        })
+    stage_a_file()
+
+    ret, printed = _do_run(cap_out, store, repo_with_failing_hook, run_opts())
+    # should still run the last hook since the `fail_fast` one didn't fail
+    assert printed.count(b'run me!') == 1
+
+
 def test_classifier_removes_dne():
     classifier = Classifier(('this_file_does_not_exist',))
     assert classifier.filenames == []
@@ -1043,8 +1143,8 @@ def test_classifier_empty_types_or(tmpdir):
             types_or=[],
             exclude_types=[],
         )
-        assert for_symlink == ['foo']
-        assert for_file == ['bar']
+        assert tuple(for_symlink) == ('foo',)
+        assert tuple(for_file) == ('bar',)
 
 
 @pytest.fixture
@@ -1058,33 +1158,33 @@ def some_filenames():
 
 def test_include_exclude_base_case(some_filenames):
     ret = filter_by_include_exclude(some_filenames, '', '^$')
-    assert ret == [
+    assert tuple(ret) == (
         '.pre-commit-hooks.yaml',
         'pre_commit/git.py',
         'pre_commit/main.py',
-    ]
+    )
 
 
 def test_matches_broken_symlink(tmpdir):
     with tmpdir.as_cwd():
         os.symlink('does-not-exist', 'link')
         ret = filter_by_include_exclude({'link'}, '', '^$')
-        assert ret == ['link']
+        assert tuple(ret) == ('link',)
 
 
 def test_include_exclude_total_match(some_filenames):
     ret = filter_by_include_exclude(some_filenames, r'^.*\.py$', '^$')
-    assert ret == ['pre_commit/git.py', 'pre_commit/main.py']
+    assert tuple(ret) == ('pre_commit/git.py', 'pre_commit/main.py')
 
 
 def test_include_exclude_does_search_instead_of_match(some_filenames):
     ret = filter_by_include_exclude(some_filenames, r'\.yaml$', '^$')
-    assert ret == ['.pre-commit-hooks.yaml']
+    assert tuple(ret) == ('.pre-commit-hooks.yaml',)
 
 
 def test_include_exclude_exclude_removes_files(some_filenames):
     ret = filter_by_include_exclude(some_filenames, '', r'\.py$')
-    assert ret == ['.pre-commit-hooks.yaml']
+    assert tuple(ret) == ('.pre-commit-hooks.yaml',)
 
 
 def test_args_hook_only(cap_out, store, repo_with_passing_hook):
@@ -1099,7 +1199,7 @@ def test_args_hook_only(cap_out, store, repo_with_passing_hook):
                 ),
                 'language': 'system',
                 'files': r'\.py$',
-                'stages': ['commit'],
+                'stages': ['pre-commit'],
             },
             {
                 'id': 'do_not_commit',

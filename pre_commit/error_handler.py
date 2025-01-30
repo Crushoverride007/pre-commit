@@ -5,7 +5,7 @@ import functools
 import os.path
 import sys
 import traceback
-from typing import Generator
+from collections.abc import Generator
 from typing import IO
 
 import pre_commit.constants as C
@@ -25,7 +25,7 @@ def _log_and_exit(
     error_msg = f'{msg}: {type(exc).__name__}: '.encode() + force_bytes(exc)
     output.write_line_b(error_msg)
 
-    _, git_version_b, _ = cmd_output_b('git', '--version', retcode=None)
+    _, git_version_b, _ = cmd_output_b('git', '--version', check=False)
     git_version = git_version_b.decode(errors='backslashreplace').rstrip()
 
     storedir = Store().directory
@@ -68,7 +68,7 @@ def _log_and_exit(
 
 
 @contextlib.contextmanager
-def error_handler() -> Generator[None, None, None]:
+def error_handler() -> Generator[None]:
     try:
         yield
     except (Exception, KeyboardInterrupt) as e:

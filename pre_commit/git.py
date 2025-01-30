@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import os.path
 import sys
-from typing import MutableMapping
+from collections.abc import Mapping
 
 from pre_commit.errors import FatalError
 from pre_commit.util import CalledProcessError
@@ -24,9 +24,7 @@ def zsplit(s: str) -> list[str]:
         return []
 
 
-def no_git_env(
-        _env: MutableMapping[str, str] | None = None,
-) -> dict[str, str]:
+def no_git_env(_env: Mapping[str, str] | None = None) -> dict[str, str]:
     # Too many bugs dealing with environment variables and GIT:
     # https://github.com/pre-commit/pre-commit/issues/300
     # In git 2.6.3 (maybe others), git exports GIT_WORK_TREE while running
@@ -44,6 +42,8 @@ def no_git_env(
             'GIT_EXEC_PATH', 'GIT_SSH', 'GIT_SSH_COMMAND', 'GIT_SSL_CAINFO',
             'GIT_SSL_NO_VERIFY', 'GIT_CONFIG_COUNT',
             'GIT_HTTP_PROXY_AUTHMETHOD',
+            'GIT_ALLOW_PROTOCOL',
+            'GIT_ASKPASS',
         }
     }
 
@@ -91,11 +91,6 @@ def get_git_common_dir(git_root: str = '.') -> str:
         return os.path.normpath(os.path.join(git_root, git_common_dir))
     else:  # pragma: no cover (git < 2.5)
         return get_git_dir(git_root)
-
-
-def get_remote_url(git_root: str) -> str:
-    _, out, _ = cmd_output('git', 'config', 'remote.origin.url', cwd=git_root)
-    return out.strip()
 
 
 def is_in_merge_conflict() -> bool:
@@ -150,18 +145,10 @@ def get_staged_files(cwd: str | None = None) -> list[str]:
 
 def intent_to_add_files() -> list[str]:
     _, stdout, _ = cmd_output(
-        'git', 'status', '--ignore-submodules', '--porcelain', '-z',
+        'git', 'diff', '--no-ext-diff', '--ignore-submodules',
+        '--diff-filter=A', '--name-only', '-z',
     )
-    parts = list(reversed(zsplit(stdout)))
-    intent_to_add = []
-    while parts:
-        line = parts.pop()
-        status, filename = line[:3], line[3:]
-        if status[0] in {'C', 'R'}:  # renames / moves have an additional arg
-            parts.pop()
-        if status[1] == 'A':
-            intent_to_add.append(filename)
-    return intent_to_add
+    return zsplit(stdout)
 
 
 def get_all_files() -> list[str]:
@@ -187,11 +174,11 @@ def head_rev(remote: str) -> str:
 
 def has_diff(*args: str, repo: str = '.') -> bool:
     cmd = ('git', 'diff', '--quiet', '--no-ext-diff', *args)
-    return cmd_output_b(*cmd, cwd=repo, retcode=None)[0] == 1
+    return cmd_output_b(*cmd, cwd=repo, check=False)[0] == 1
 
 
 def has_core_hookpaths_set() -> bool:
-    _, out, _ = cmd_output_b('git', 'config', 'core.hooksPath', retcode=None)
+    _, out, _ = cmd_output_b('git', 'config', 'core.hooksPath', check=False)
     return bool(out.strip())
 
 

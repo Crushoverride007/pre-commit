@@ -45,9 +45,11 @@ def test_error_handler_fatal_error(mocked_log_and_exit):
         r'Traceback \(most recent call last\):\n'
         r'  File ".+pre_commit.error_handler.py", line \d+, in error_handler\n'
         r'    yield\n'
+        r'(    \^\^\^\^\^\n)?'
         r'  File ".+tests.error_handler_test.py", line \d+, '
         r'in test_error_handler_fatal_error\n'
         r'    raise exc\n'
+        r'(    \^\^\^\^\^\^\^\^\^\n)?'
         r'(pre_commit\.errors\.)?FatalError: just a test\n',
     )
     pattern.assert_matches(mocked_log_and_exit.call_args[0][3])
@@ -69,9 +71,11 @@ def test_error_handler_uncaught_error(mocked_log_and_exit):
         r'Traceback \(most recent call last\):\n'
         r'  File ".+pre_commit.error_handler.py", line \d+, in error_handler\n'
         r'    yield\n'
+        r'(    \^\^\^\^\^\n)?'
         r'  File ".+tests.error_handler_test.py", line \d+, '
         r'in test_error_handler_uncaught_error\n'
         r'    raise exc\n'
+        r'(    \^\^\^\^\^\^\^\^\^\n)?'
         r'ValueError: another test\n',
     )
     pattern.assert_matches(mocked_log_and_exit.call_args[0][3])
@@ -93,9 +97,11 @@ def test_error_handler_keyboardinterrupt(mocked_log_and_exit):
         r'Traceback \(most recent call last\):\n'
         r'  File ".+pre_commit.error_handler.py", line \d+, in error_handler\n'
         r'    yield\n'
+        r'(    \^\^\^\^\^\n)?'
         r'  File ".+tests.error_handler_test.py", line \d+, '
         r'in test_error_handler_keyboardinterrupt\n'
         r'    raise exc\n'
+        r'(    \^\^\^\^\^\^\^\^\^\n)?'
         r'KeyboardInterrupt\n',
     )
     pattern.assert_matches(mocked_log_and_exit.call_args[0][3])
@@ -156,7 +162,7 @@ def test_error_handler_non_ascii_exception(mock_store_dir):
 def test_error_handler_non_utf8_exception(mock_store_dir):
     with pytest.raises(SystemExit):
         with error_handler.error_handler():
-            raise CalledProcessError(1, ('exe',), 0, b'error: \xa0\xe1', b'')
+            raise CalledProcessError(1, ('exe',), b'error: \xa0\xe1', b'')
 
 
 def test_error_handler_non_stringable_exception(mock_store_dir):
@@ -177,10 +183,11 @@ def test_error_handler_no_tty(tempdir_factory):
         'from pre_commit.error_handler import error_handler\n'
         'with error_handler():\n'
         '    raise ValueError("\\u2603")\n',
-        retcode=3,
+        check=False,
         tempdir_factory=tempdir_factory,
         pre_commit_home=pre_commit_home,
     )
+    assert ret == 3
     log_file = os.path.join(pre_commit_home, 'pre-commit.log')
     out_lines = out.splitlines()
     assert out_lines[-2] == 'An unexpected error has occurred: ValueError: ☃'

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from typing import Sequence
+from collections.abc import Sequence
 
 import pre_commit.constants as C
 from pre_commit import git
@@ -21,7 +21,7 @@ def check_all_hooks_match_files(config_file: str) -> int:
     for hook in all_hooks(config, Store()):
         if hook.always_run or hook.language == 'fail':
             continue
-        elif not classifier.filenames_for_hook(hook):
+        elif not any(classifier.filenames_for_hook(hook)):
             print(f'{hook.id} does not apply to this repository')
             retv = 1
 

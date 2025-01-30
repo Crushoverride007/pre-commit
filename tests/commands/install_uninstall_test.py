@@ -126,7 +126,7 @@ def _get_commit_output(tempdir_factory, touch_file='foo', **kwargs):
     cmd_output('git', 'add', touch_file)
     return git_commit(
         fn=cmd_output_mocked_pre_commit_home,
-        retcode=None,
+        check=False,
         tempdir_factory=tempdir_factory,
         **kwargs,
     )
@@ -248,7 +248,7 @@ def test_install_idempotent(tempdir_factory, store):
 def _path_without_us():
     # Choose a path which *probably* doesn't include us
     env = dict(os.environ)
-    exe = find_executable('pre-commit', _environ=env)
+    exe = find_executable('pre-commit', env=env)
     while exe:
         parts = env['PATH'].split(os.pathsep)
         after = [
@@ -258,7 +258,7 @@ def _path_without_us():
         if parts == after:
             raise AssertionError(exe, parts)
         env['PATH'] = os.pathsep.join(after)
-        exe = find_executable('pre-commit', _environ=env)
+        exe = find_executable('pre-commit', env=env)
     return env['PATH']
 
 
@@ -276,18 +276,19 @@ def test_environment_not_sourced(tempdir_factory, store):
 
         # Use a specific homedir to ignore --user installs
         homedir = tempdir_factory.get()
-        ret, out = git_commit(
-            env={
-                'HOME': homedir,
-                'PATH': _path_without_us(),
-                # Git needs this to make a commit
-                'GIT_AUTHOR_NAME': os.environ['GIT_AUTHOR_NAME'],
-                'GIT_COMMITTER_NAME': os.environ['GIT_COMMITTER_NAME'],
-                'GIT_AUTHOR_EMAIL': os.environ['GIT_AUTHOR_EMAIL'],
-                'GIT_COMMITTER_EMAIL': os.environ['GIT_COMMITTER_EMAIL'],
-            },
-            retcode=None,
-        )
+        env = {
+            'HOME': homedir,
+            'PATH': _path_without_us(),
+            # Git needs this to make a commit
+            'GIT_AUTHOR_NAME': os.environ['GIT_AUTHOR_NAME'],
+            'GIT_COMMITTER_NAME': os.environ['GIT_COMMITTER_NAME'],
+            'GIT_AUTHOR_EMAIL': os.environ['GIT_AUTHOR_EMAIL'],
+            'GIT_COMMITTER_EMAIL': os.environ['GIT_COMMITTER_EMAIL'],
+        }
+        if os.name == 'nt' and 'PATHEXT' in os.environ:  # pragma: no cover
+            env['PATHEXT'] = os.environ['PATHEXT']
+
+        ret, out = git_commit(env=env, check=False)
         assert ret == 1
         assert out == (
             '`pre-commit` not found.  '
@@ -348,8 +349,9 @@ def test_install_existing_hooks_no_overwrite(tempdir_factory, store):
         # We should run both the legacy and pre-commit hooks
         ret, output = _get_commit_output(tempdir_factory)
         assert ret == 0
-        assert output.startswith('legacy hook\n')
-        NORMAL_PRE_COMMIT_RUN.assert_matches(output[len('legacy hook\n'):])
+        legacy = 'legacy hook\n'
+        assert output.startswith(legacy)
+        NORMAL_PRE_COMMIT_RUN.assert_matches(output.removeprefix(legacy))
 
 
 def test_legacy_overwriting_legacy_hook(tempdir_factory, store):
@@ -374,8 +376,9 @@ def test_install_existing_hook_no_overwrite_idempotent(tempdir_factory, store):
         # We should run both the legacy and pre-commit hooks
         ret, output = _get_commit_output(tempdir_factory)
         assert ret == 0
-        assert output.startswith('legacy hook\n')
-        NORMAL_PRE_COMMIT_RUN.assert_matches(output[len('legacy hook\n'):])
+        legacy = 'legacy hook\n'
+        assert output.startswith(legacy)
+        NORMAL_PRE_COMMIT_RUN.assert_matches(output.removeprefix(legacy))
 
 
 def test_install_with_existing_non_utf8_script(tmpdir, store):
@@ -551,7 +554,7 @@ def _get_push_output(tempdir_factory, remote='origin', opts=()):
     return cmd_output_mocked_pre_commit_home(
         'git', 'push', remote, 'HEAD:new_branch', *opts,
         tempdir_factory=tempdir_factory,
-        retcode=None,
+        check=False,
     )[:2]
 
 
@@ -739,20 +742,22 @@ def test_commit_msg_legacy(commit_msg_repo, tempdir_factory, store):
 
 def test_post_commit_integration(tempdir_factory, store):
     path = git_dir(tempdir_factory)
-    config = [
-        {
-            'repo': 'local',
-            'hooks': [{
-                'id': 'post-commit',
-                'name': 'Post commit',
-                'entry': 'touch post-commit.tmp',
-                'language': 'system',
-                'always_run': True,
-                'verbose': True,
-                'stages': ['post-commit'],
-            }],
-        },
-    ]
+    config = {
+        'repos': [
+            {
+                'repo': 'local',
+                'hooks': [{
+                    'id': 'post-commit',
+                    'name': 'Post commit',
+                    'entry': 'touch post-commit.tmp',
+                    'language': 'system',
+                    'always_run': True,
+                    'verbose': True,
+                    'stages': ['post-commit'],
+                }],
+            },
+        ],
+    }
     write_config(path, config)
     with cwd(path):
         _get_commit_output(tempdir_factory)
@@ -765,20 +770,22 @@ def test_post_commit_integration(tempdir_factory, store):
 
 def test_post_merge_integration(tempdir_factory, store):
     path = git_dir(tempdir_factory)
-    config = [
-        {
-            'repo': 'local',
-            'hooks': [{
-                'id': 'post-merge',
-                'name': 'Post merge',
-                'entry': 'touch post-merge.tmp',
-                'language': 'system',
-                'always_run': True,
-                'verbose': True,
-                'stages': ['post-merge'],
-            }],
-        },
-    ]
+    config = {
+        'repos': [
+            {
+                'repo': 'local',
+                'hooks': [{
+                    'id': 'post-merge',
+                    'name': 'Post merge',
+                    'entry': 'touch post-merge.tmp',
+                    'language': 'system',
+                    'always_run': True,
+                    'verbose': True,
+                    'stages': ['post-merge'],
+                }],
+            },
+        ],
+    }
     write_config(path, config)
     with cwd(path):
         #  create a simple diamond of commits for a non-trivial merge
@@ -805,22 +812,64 @@ def test_post_merge_integration(tempdir_factory, store):
         assert os.path.exists('post-merge.tmp')
 
 
+def test_pre_rebase_integration(tempdir_factory, store):
+    path = git_dir(tempdir_factory)
+    config = {
+        'repos': [
+            {
+                'repo': 'local',
+                'hooks': [{
+                    'id': 'pre-rebase',
+                    'name': 'Pre rebase',
+                    'entry': 'touch pre-rebase.tmp',
+                    'language': 'system',
+                    'always_run': True,
+                    'verbose': True,
+                    'stages': ['pre-rebase'],
+                }],
+            },
+        ],
+    }
+    write_config(path, config)
+    with cwd(path):
+        install(C.CONFIG_FILE, store, hook_types=['pre-rebase'])
+        open('foo', 'a').close()
+        cmd_output('git', 'add', '.')
+        git_commit()
+
+        cmd_output('git', 'checkout', '-b', 'branch')
+        open('bar', 'a').close()
+        cmd_output('git', 'add', '.')
+        git_commit()
+
+        cmd_output('git', 'checkout', 'master')
+        open('baz', 'a').close()
+        cmd_output('git', 'add', '.')
+        git_commit()
+
+        cmd_output('git', 'checkout', 'branch')
+        cmd_output('git', 'rebase', 'master', 'branch')
+        assert os.path.exists('pre-rebase.tmp')
+
+
 def test_post_rewrite_integration(tempdir_factory, store):
     path = git_dir(tempdir_factory)
-    config = [
-        {
-            'repo': 'local',
-            'hooks': [{
-                'id': 'post-rewrite',
-                'name': 'Post rewrite',
-                'entry': 'touch post-rewrite.tmp',
-                'language': 'system',
-                'always_run': True,
-                'verbose': True,
-                'stages': ['post-rewrite'],
-            }],
-        },
-    ]
+    config = {
+        'repos': [
+            {
+                'repo': 'local',
+                'hooks': [{
+                    'id': 'post-rewrite',
+                    'name': 'Post rewrite',
+                    'entry': 'touch post-rewrite.tmp',
+                    'language': 'system',
+                    'always_run': True,
+                    'verbose': True,
+                    'stages': ['post-rewrite'],
+                }],
+            },
+        ],
+    }
     write_config(path, config)
     with cwd(path):
         open('init', 'a').close()
@@ -836,21 +885,23 @@ def test_post_rewrite_integration(tempdir_factory, store):
 
 def test_post_checkout_integration(tempdir_factory, store):
     path = git_dir(tempdir_factory)
-    config = [
-        {
-            'repo': 'local',
-            'hooks': [{
-                'id': 'post-checkout',
-                'name': 'Post checkout',
-                'entry': 'bash -c "echo ${PRE_COMMIT_TO_REF}"',
-                'language': 'system',
-                'always_run': True,
-                'verbose': True,
-                'stages': ['post-checkout'],
-            }],
-        },
-        {'repo': 'meta', 'hooks': [{'id': 'identity'}]},
-    ]
+    config = {
+        'repos': [
+            {
+                'repo': 'local',
+                'hooks': [{
+                    'id': 'post-checkout',
+                    'name': 'Post checkout',
+                    'entry': 'bash -c "echo ${PRE_COMMIT_TO_REF}"',
+                    'language': 'system',
+                    'always_run': True,
+                    'verbose': True,
+                    'stages': ['post-checkout'],
+                }],
+            },
+            {'repo': 'meta', 'hooks': [{'id': 'identity'}]},
+        ],
+    }
     write_config(path, config)
     with cwd(path):
         cmd_output('git', 'add', '.')

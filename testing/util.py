@@ -3,26 +3,15 @@ from __future__ import annotations
 import contextlib
 import os.path
 import subprocess
+import sys
 
 import pytest
 
-from pre_commit import parse_shebang
-from pre_commit.util import CalledProcessError
 from pre_commit.util import cmd_output
-from pre_commit.util import cmd_output_b
 from testing.auto_namedtuple import auto_namedtuple
 
 
 TESTING_DIR = os.path.abspath(os.path.dirname(__file__))
-
-
-def docker_is_running() -> bool:  # pragma: win32 no cover
-    try:
-        cmd_output_b('docker', 'ps')
-    except CalledProcessError:  # pragma: no cover
-        return False
-    else:
-        return True
 
 
 def get_resource_path(path):
@@ -42,23 +31,7 @@ def cmd_output_mocked_pre_commit_home(
     return ret, out.replace('\r\n', '\n'), None
 
 
-skipif_cant_run_coursier = pytest.mark.skipif(
-    os.name == 'nt' or parse_shebang.find_executable('cs') is None,
-    reason="coursier isn't installed or can't be found",
-)
-skipif_cant_run_docker = pytest.mark.skipif(
-    os.name == 'nt' or not docker_is_running(),
-    reason="Docker isn't running or can't be accessed",
-)
-skipif_cant_run_lua = pytest.mark.skipif(
-    os.name == 'nt',
-    reason="lua isn't installed or can't be found",
-)
-skipif_cant_run_swift = pytest.mark.skipif(
-    parse_shebang.find_executable('swift') is None,
-    reason="swift isn't installed or can't be found",
-)
-xfailif_windows = pytest.mark.xfail(os.name == 'nt', reason='windows')
+xfailif_windows = pytest.mark.xfail(sys.platform == 'win32', reason='windows')
 
 
 def run_opts(
@@ -71,9 +44,11 @@ def run_opts(
         local_branch='',
         from_ref='',
         to_ref='',
+        pre_rebase_upstream='',
+        pre_rebase_branch='',
         remote_name='',
         remote_url='',
-        hook_stage='commit',
+        hook_stage='pre-commit',
         show_diff_on_failure=False,
         commit_msg_filename='',
         prepare_commit_message_source='',
@@ -94,6 +69,8 @@ def run_opts(
         local_branch=local_branch,
         from_ref=from_ref,
         to_ref=to_ref,
+        pre_rebase_upstream=pre_rebase_upstream,
+        pre_rebase_branch=pre_rebase_branch,
         remote_name=remote_name,
         remote_url=remote_url,
         hook_stage=hook_stage,

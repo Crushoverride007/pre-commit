@@ -1,3 +1,378 @@
+4.1.0 - 2025-01-20
+==================
+
+### Features
+- Add `language: julia`.
+    - #3348 PR by @fredrikekre.
+    - #2689 issue @jmuchovej.
+
+### Fixes
+- Disable automatic toolchain switching for `language: golang`.
+    - #3304 PR by @AleksaC.
+    - #3300 issue by @AleksaC.
+    - #3149 issue by @nijel.
+- Fix `language: r` installation when initiated by RStudio.
+    - #3389 PR by @lorenzwalthert.
+    - #3385 issue by @lorenzwalthert.
+
+
+4.0.1 - 2024-10-08
+==================
+
+### Fixes
+- Fix `pre-commit migrate-config` for unquoted deprecated stages names with
+  purelib `pyyaml`.
+    - #3324 PR by @asottile.
+    - pre-commit-ci/issues#234 issue by @lorenzwalthert.
+
+4.0.0 - 2024-10-05
+==================
+
+### Features
+- Improve `pre-commit migrate-config` to handle more yaml formats.
+    - #3301 PR by @asottile.
+- Handle `stages` deprecation in `pre-commit migrate-config`.
+    - #3302 PR by @asottile.
+    - #2732 issue by @asottile.
+- Upgrade `ruby-build`.
+    - #3199 PR by @ThisGuyCodes.
+- Add "sensible regex" warnings to `repo: meta`.
+    - #3311 PR by @asottile.
+- Add warnings for deprecated `stages` (`commit` -> `pre-commit`, `push` ->
+  `pre-push`, `merge-commit` -> `pre-merge-commit`).
+    - #3312 PR by @asottile.
+    - #3313 PR by @asottile.
+    - #3315 PR by @asottile.
+    - #2732 issue by @asottile.
+
+### Migrating
+- `language: python_venv` has been removed -- use `language: python` instead.
+    - #3320 PR by @asottile.
+    - #2734 issue by @asottile.
+
+3.8.0 - 2024-07-28
+==================
+
+### Features
+- Implement health checks for `language: r` so environments are recreated if
+  the system version of R changes.
+    - #3206 issue by @lorenzwalthert.
+    - #3265 PR by @lorenzwalthert.
+
+3.7.1 - 2024-05-10
+==================
+
+### Fixes
+- Fix `language: rust` default language version check when `rust-toolchain.toml`
+  is present.
+    - issue by @gaborbernat.
+    - #3201 PR by @asottile.
+
+3.7.0 - 2024-03-24
+==================
+
+### Features
+- Use a tty for `docker` and `docker_image` hooks when `--color` is specified.
+    - #3122 PR by @glehmann.
+
+### Fixes
+- Fix `fail_fast` for individual hooks stopping when previous hooks had failed.
+    - #3167 issue by @tp832944.
+    - #3168 PR by @asottile.
+
+### Updating
+- The per-hook behaviour of `fail_fast` was fixed.  If you want the pre-3.7.0
+  behaviour, add `fail_fast: true` to all hooks before the last `fail_fast`
+  hook.
+
+3.6.2 - 2024-02-18
+==================
+
+### Fixes
+- Fix building golang hooks during `git commit --all`.
+    - #3130 PR by @asottile.
+    - #2722 issue by @pestanko and @matthewhughes934.
+
+3.6.1 - 2024-02-10
+==================
+
+### Fixes
+- Remove `PYTHONEXECUTABLE` from environment when running.
+    - #3110 PR by @untitaker.
+- Handle staged-files-only with only a crlf diff.
+    - #3126 PR by @asottile.
+    - issue by @tyyrok.
+
+3.6.0 - 2023-12-09
+==================
+
+### Features
+- Check `minimum_pre_commit_version` first when parsing configs.
+    - #3092 PR by @asottile.
+
+### Fixes
+- Fix deprecation warnings for `importlib.resources`.
+    - #3043 PR by @asottile.
+- Fix deprecation warnings for rmtree.
+    - #3079 PR by @edgarrmondragon.
+
+### Updating
+- Drop support for python<3.9.
+    - #3042 PR by @asottile.
+    - #3093 PR by @asottile.
+
+3.5.0 - 2023-10-13
+==================
+
+### Features
+- Improve performance of `check-hooks-apply` and `check-useless-excludes`.
+    - #2998 PR by @mxr.
+    - #2935 issue by @mxr.
+
+### Fixes
+- Use `time.monotonic()` for more accurate hook timing.
+    - #3024 PR by @adamchainz.
+
+### Migrating
+- Require npm 6.x+ for `language: node` hooks.
+    - #2996 PR by @RoelAdriaans.
+    - #1983 issue by @henryiii.
+
+3.4.0 - 2023-09-02
+==================
+
+### Features
+- Add `language: haskell`.
+    - #2932 by @alunduil.
+- Improve cpu count detection when run under cgroups.
+    - #2979 PR by @jdb8.
+    - #2978 issue by @jdb8.
+
+### Fixes
+- Handle negative exit codes from hooks receiving posix signals.
+    - #2971 PR by @chriskuehl.
+    - #2970 issue by @chriskuehl.
+
+3.3.3 - 2023-06-13
+==================
+
+### Fixes
+- Work around OS packagers setting `--install-dir` / `--bin-dir` in gem settings.
+    - #2905 PR by @jaysoffian.
+    - #2799 issue by @lmilbaum.
+
+3.3.2 - 2023-05-17
+==================
+
+### Fixes
+- Work around `r` on windows sometimes double-un-quoting arguments.
+    - #2885 PR by @lorenzwalthert.
+    - #2870 issue by @lorenzwalthert.
+
+3.3.1 - 2023-05-02
+==================
+
+### Fixes
+- Work around `git` partial clone bug for `autoupdate` on windows.
+    - #2866 PR by @asottile.
+    - #2865 issue by @adehad.
+
+3.3.0 - 2023-05-01
+==================
+
+### Features
+- Upgrade ruby-build.
+    - #2846 PR by @jalessio.
+- Use blobless clone for faster autoupdate.
+    - #2859 PR by @asottile.
+- Add `-j` / `--jobs` argument to `autoupdate` for parallel execution.
+    - #2863 PR by @asottile.
+    - issue by @gaborbernat.
+
+3.2.2 - 2023-04-03
+==================
+
+### Fixes
+- Fix support for swift >= 5.8.
+    - #2836 PR by @edelabar.
+    - #2835 issue by @kgrobelny-intive.
+
+3.2.1 - 2023-03-25
+==================
+
+### Fixes
+- Fix `language_version` for `language: rust` without global `rustup`.
+    - #2823 issue by @daschuer.
+    - #2827 PR by @asottile.
+
+3.2.0 - 2023-03-17
+==================
+
+### Features
+- Allow `pre-commit`, `pre-push`, and `pre-merge-commit` as `stages`.
+    - #2732 issue by @asottile.
+    - #2808 PR by @asottile.
+- Add `pre-rebase` hook support.
+    - #2582 issue by @BrutalSimplicity.
+    - #2725 PR by @mgaligniana.
+
+### Fixes
+- Remove bulky cargo cache from `language: rust` installs.
+    - #2820 PR by @asottile.
+
+3.1.1 - 2023-02-27
+==================
+
+### Fixes
+- Fix `rust` with `language_version` and a non-writable host `RUSTUP_HOME`.
+    - pre-commit-ci/issues#173 by @Swiftb0y.
+    - #2788 by @asottile.
+
+3.1.0 - 2023-02-22
+==================
+
+### Fixes
+- Fix `dotnet` for `.sln`-based hooks for dotnet>=7.0.200.
+    - #2763 PR by @m-rsha.
+- Prevent stashing when `diff` fails to execute.
+    - #2774 PR by @asottile.
+    - #2773 issue by @strubbly.
+- Dependencies are no longer sorted in repository key.
+    - #2776 PR by @asottile.
+
+### Updating
+- Deprecate `language: python_venv`.  Use `language: python` instead.
+    - #2746 PR by @asottile.
+    - #2734 issue by @asottile.
+
+
+3.0.4 - 2023-02-03
+==================
+
+### Fixes
+- Fix hook diff detection for files affected by `--textconv`.
+    - #2743 PR by @adamchainz.
+    - #2743 issue by @adamchainz.
+
+3.0.3 - 2023-02-01
+==================
+
+### Fixes
+- Revert "Prevent local `Gemfile` from interfering with hook execution.".
+    - #2739 issue by @Roguelazer.
+    - #2740 PR by @asottile.
+
+3.0.2 - 2023-01-29
+==================
+
+### Fixes
+- Prevent local `Gemfile` from interfering with hook execution.
+    - #2727 PR by @asottile.
+- Fix `language: r`, `repo: local` hooks
+    - pre-commit-ci/issues#107 by @lorenzwalthert.
+    - #2728 PR by @asottile.
+
+3.0.1 - 2023-01-26
+==================
+
+### Fixes
+- Ensure coursier hooks are available offline after install.
+    - #2723 PR by @asottile.
+
+3.0.0 - 2023-01-23
+==================
+
+### Features
+- Make `language: golang` bootstrap `go` if not present.
+    - #2651 PR by @taoufik07.
+    - #2649 issue by @taoufik07.
+- `language: coursier` now supports `additional_dependencies` and `repo: local`
+    - #2702 PR by @asottile.
+- Upgrade `ruby-build` to `20221225`.
+    - #2718 PR by @jalessio.
+
+### Fixes
+- Improve error message for invalid yaml for `pre-commit autoupdate`.
+    - #2686 PR by @asottile.
+    - #2685 issue by @CarstenGrohmann.
+- `repo: local` no longer provisions an empty `git` repo.
+    - #2699 PR by @asottile.
+
+### Updating
+- Drop support for python<3.8
+    - #2655 PR by @asottile.
+- Drop support for top-level list, use `pre-commit migrate-config` to update.
+    - #2656 PR by @asottile.
+- Drop support for `sha` to specify revision, use `pre-commit migrate-config`
+  to update.
+    - #2657 PR by @asottile.
+- Remove `pre-commit-validate-config` and `pre-commit-validate-manifest`, use
+  `pre-commit validate-config` and `pre-commit validate-manifest` instead.
+    - #2658 PR by @asottile.
+- `language: golang` hooks must use `go.mod` to specify dependencies
+    - #2672 PR by @taoufik07.
+
+
+2.21.0 - 2022-12-25
+===================
+
+### Features
+- Require new-enough virtualenv to prevent 3.10 breakage
+    - #2467 PR by @asottile.
+- Respect aliases with `SKIP` for environment install.
+    - #2480 PR by @kmARC.
+    - #2478 issue by @kmARC.
+- Allow `pre-commit run --files` against unmerged paths.
+    - #2484 PR by @asottile.
+- Also apply regex warnings to `repo: local` hooks.
+    - #2524 PR by @chrisRedwine.
+    - #2521 issue by @asottile.
+- `rust` is now a "first class" language -- supporting `language_version` and
+  installation when not present.
+    - #2534 PR by @Holzhaus.
+- `r` now uses more-reliable binary installation.
+    - #2460 PR by @lorenzwalthert.
+- `GIT_ALLOW_PROTOCOL` is now passed through for git operations.
+    - #2555 PR by @asottile.
+- `GIT_ASKPASS` is now passed through for git operations.
+    - #2564 PR by @mattp-.
+- Remove `toml` dependency by using `cargo add` directly.
+    - #2568 PR by @m-rsha.
+- Support `dotnet` hooks which have dotted prefixes.
+    - #2641 PR by @rkm.
+    - #2629 issue by @rkm.
+
+### Fixes
+- Properly adjust `--commit-msg-filename` if run from a sub directory.
+    - #2459 PR by @asottile.
+- Simplify `--intent-to-add` detection by using `git diff`.
+    - #2580 PR by @m-rsha.
+- Fix `R.exe` selection on windows.
+    - #2605 PR by @lorenzwalthert.
+    - #2599 issue by @SInginc.
+- Skip default `nuget` source when installing `dotnet` packages.
+    - #2642 PR by @rkm.
+
+2.20.0 - 2022-07-10
+===================
+
+### Features
+- Expose `source` and `object-name` (positional args) of `prepare-commit-msg`
+  hook as `PRE_COMMIT_COMIT_MSG_SOURCE` and `PRE_COMMIT_COMMIT_OBJECT_NAME`.
+    - #2407 PR by @M-Whitaker.
+    - #2406 issue by @M-Whitaker.
+
+### Fixes
+- Fix `language: ruby` installs when `--user-install` is set in gemrc.
+    - #2394 PR by @narpfel.
+    - #2393 issue by @narpfel.
+- Adjust pty setup for solaris.
+    - #2390 PR by @gaige.
+    - #2389 issue by @gaige.
+- Remove unused `--config` option from `gc`, `sample-config`,
+  `validate-config`, `validate-manifest` sub-commands.
+    - #2429 PR by @asottile.
+
 2.19.0 - 2022-05-05
 ===================
 

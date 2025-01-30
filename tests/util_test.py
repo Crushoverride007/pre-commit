@@ -12,17 +12,14 @@ from pre_commit.util import cmd_output
 from pre_commit.util import cmd_output_b
 from pre_commit.util import cmd_output_p
 from pre_commit.util import make_executable
-from pre_commit.util import parse_version
 from pre_commit.util import rmtree
-from pre_commit.util import tmpdir
 
 
 def test_CalledProcessError_str():
-    error = CalledProcessError(1, ('exe',), 0, b'output', b'errors')
+    error = CalledProcessError(1, ('exe',), b'output\n', b'errors\n')
     assert str(error) == (
         "command: ('exe',)\n"
         'return code: 1\n'
-        'expected return code: 0\n'
         'stdout:\n'
         '    output\n'
         'stderr:\n'
@@ -31,11 +28,10 @@ def test_CalledProcessError_str():
 
 
 def test_CalledProcessError_str_nooutput():
-    error = CalledProcessError(1, ('exe',), 0, b'', b'')
+    error = CalledProcessError(1, ('exe',), b'', b'')
     assert str(error) == (
         "command: ('exe',)\n"
         'return code: 1\n'
-        'expected return code: 0\n'
         'stdout: (none)\n'
         'stderr: (none)'
     )
@@ -76,21 +72,15 @@ def test_clean_path_on_failure_cleans_for_system_exit(in_tmpdir):
     assert not os.path.exists('foo')
 
 
-def test_tmpdir():
-    with tmpdir() as tempdir:
-        assert os.path.exists(tempdir)
-    assert not os.path.exists(tempdir)
-
-
 def test_cmd_output_exe_not_found():
-    ret, out, _ = cmd_output('dne', retcode=None)
+    ret, out, _ = cmd_output('dne', check=False)
     assert ret == 1
     assert out == 'Executable `dne` not found'
 
 
 @pytest.mark.parametrize('fn', (cmd_output_b, cmd_output_p))
 def test_cmd_output_exe_not_found_bytes(fn):
-    ret, out, _ = fn('dne', retcode=None, stderr=subprocess.STDOUT)
+    ret, out, _ = fn('dne', check=False, stderr=subprocess.STDOUT)
     assert ret == 1
     assert out == b'Executable `dne` not found'
 
@@ -101,16 +91,10 @@ def test_cmd_output_no_shebang(tmpdir, fn):
     make_executable(f)
 
     # previously this raised `OSError` -- the output is platform specific
-    ret, out, _ = fn(str(f), retcode=None, stderr=subprocess.STDOUT)
+    ret, out, _ = fn(str(f), check=False, stderr=subprocess.STDOUT)
     assert ret == 1
     assert isinstance(out, bytes)
     assert out.endswith(b'\n')
-
-
-def test_parse_version():
-    assert parse_version('0.0') == parse_version('0.0')
-    assert parse_version('0.1') > parse_version('0.0')
-    assert parse_version('2.1') >= parse_version('2')
 
 
 def test_rmtree_read_only_directories(tmpdir):

@@ -4,28 +4,27 @@ import contextlib
 import functools
 import os
 import sys
-from typing import Generator
-from typing import Sequence
+from collections.abc import Generator
+from collections.abc import Sequence
 
 import pre_commit.constants as C
+from pre_commit import lang_base
 from pre_commit.envcontext import envcontext
 from pre_commit.envcontext import PatchesT
 from pre_commit.envcontext import UNSET
 from pre_commit.envcontext import Var
-from pre_commit.hook import Hook
-from pre_commit.languages import helpers
 from pre_commit.parse_shebang import find_executable
 from pre_commit.prefix import Prefix
 from pre_commit.util import CalledProcessError
-from pre_commit.util import clean_path_on_failure
 from pre_commit.util import cmd_output
 from pre_commit.util import cmd_output_b
 from pre_commit.util import win_exe
 
 ENVIRONMENT_DIR = 'py_env'
+run_hook = lang_base.basic_run_hook
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def _version_info(exe: str) -> str:
     prog = 'import sys;print(".".join(str(p) for p in sys.version_info))'
     try:
@@ -49,7 +48,7 @@ def _read_pyvenv_cfg(filename: str) -> dict[str, str]:
 
 def bin_dir(venv: str) -> str:
     """On windows there's a different directory for the virtualenv"""
-    bin_part = 'Scripts' if os.name == 'nt' else 'bin'
+    bin_part = 'Scripts' if sys.platform == 'win32' else 'bin'
     return os.path.join(venv, bin_part)
 
 
@@ -66,7 +65,7 @@ def _find_by_py_launcher(
         version: str,
 ) -> str | None:  # pragma: no cover (windows only)
     if version.startswith('python'):
-        num = version[len('python'):]
+        num = version.removeprefix('python')
         cmd = ('py', f'-{num}', '-c', 'import sys; print(sys.executable)')
         env = dict(os.environ, PYTHONIOENCODING='UTF-8')
         try:
@@ -125,7 +124,7 @@ def _sys_executable_matches(version: str) -> bool:
         return False
 
     try:
-        info = tuple(int(p) for p in version[len('python'):].split('.'))
+        info = tuple(int(p) for p in version.removeprefix('python').split('.'))
     except ValueError:
         return False
 
@@ -138,7 +137,7 @@ def norm_version(version: str) -> str | None:
     elif _sys_executable_matches(version):  # virtualenv defaults to our exe
         return None
 
-    if os.name == 'nt':  # pragma: no cover (windows)
+    if sys.platform == 'win32':  # pragma: no cover (windows)
         version_exec = _find_by_py_launcher(version)
         if version_exec:
             return version_exec
@@ -153,19 +152,14 @@ def norm_version(version: str) -> str | None:
 
 
 @contextlib.contextmanager
-def in_env(
-        prefix: Prefix,
-        language_version: str,
-) -> Generator[None, None, None]:
-    directory = helpers.environment_dir(ENVIRONMENT_DIR, language_version)
-    envdir = prefix.path(directory)
+def in_env(prefix: Prefix, version: str) -> Generator[None]:
+    envdir = lang_base.environment_dir(prefix, ENVIRONMENT_DIR, version)
     with envcontext(get_env_patch(envdir)):
         yield
 
 
-def health_check(prefix: Prefix, language_version: str) -> str | None:
-    directory = helpers.environment_dir(ENVIRONMENT_DIR, language_version)
-    envdir = prefix.path(directory)
+def health_check(prefix: Prefix, version: str) -> str | None:
+    envdir = lang_base.environment_dir(prefix, ENVIRONMENT_DIR, version)
     pyvenv_cfg = os.path.join(envdir, 'pyvenv.cfg')
 
     # created with "old" virtualenv
@@ -208,23 +202,13 @@ def install_environment(
         version: str,
         additional_dependencies: Sequence[str],
 ) -> None:
-    envdir = prefix.path(helpers.environment_dir(ENVIRONMENT_DIR, version))
+    envdir = lang_base.environment_dir(prefix, ENVIRONMENT_DIR, version)
     venv_cmd = [sys.executable, '-mvirtualenv', envdir]
     python = norm_version(version)
     if python is not None:
         venv_cmd.extend(('-p', python))
     install_cmd = ('python', '-mpip', 'install', '.', *additional_dependencies)
 
-    with clean_path_on_failure(envdir):
-        cmd_output_b(*venv_cmd, cwd='/')
-        with in_env(prefix, version):
-            helpers.run_setup_cmd(prefix, install_cmd)
-
-
-def run_hook(
-        hook: Hook,
-        file_args: Sequence[str],
-        color: bool,
-) -> tuple[int, bytes]:
-    with in_env(hook.prefix, hook.language_version):
-        return helpers.run_xargs(hook, hook.cmd, file_args, color=color)
+    cmd_output_b(*venv_cmd, cwd='/')
+    with in_env(prefix, version):
+        lang_base.setup_cmd(prefix, install_cmd)

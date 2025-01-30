@@ -9,19 +9,20 @@ import re
 import subprocess
 import time
 import unicodedata
+from collections.abc import Generator
+from collections.abc import Iterable
+from collections.abc import MutableMapping
+from collections.abc import Sequence
 from typing import Any
-from typing import Collection
-from typing import MutableMapping
-from typing import Sequence
 
 from identify.identify import tags_from_path
 
 from pre_commit import color
 from pre_commit import git
 from pre_commit import output
+from pre_commit.all_languages import languages
 from pre_commit.clientlib import load_config
 from pre_commit.hook import Hook
-from pre_commit.languages.all import languages
 from pre_commit.repository import all_hooks
 from pre_commit.repository import install_hook_envs
 from pre_commit.staged_files_only import staged_files_only
@@ -57,37 +58,36 @@ def _full_msg(
 
 
 def filter_by_include_exclude(
-        names: Collection[str],
+        names: Iterable[str],
         include: str,
         exclude: str,
-) -> list[str]:
+) -> Generator[str]:
     include_re, exclude_re = re.compile(include), re.compile(exclude)
-    return [
+    return (
         filename for filename in names
         if include_re.search(filename)
         if not exclude_re.search(filename)
-    ]
+    )
 
 
 class Classifier:
-    def __init__(self, filenames: Collection[str]) -> None:
+    def __init__(self, filenames: Iterable[str]) -> None:
         self.filenames = [f for f in filenames if os.path.lexists(f)]
 
-    @functools.lru_cache(maxsize=None)
+    @functools.cache
     def _types_for_file(self, filename: str) -> set[str]:
         return tags_from_path(filename)
 
     def by_types(
             self,
-            names: Sequence[str],
-            types: Collection[str],
-            types_or: Collection[str],
-            exclude_types: Collection[str],
-    ) -> list[str]:
+            names: Iterable[str],
+            types: Iterable[str],
+            types_or: Iterable[str],
+            exclude_types: Iterable[str],
+    ) -> Generator[str]:
         types = frozenset(types)
         types_or = frozenset(types_or)
         exclude_types = frozenset(exclude_types)
-        ret = []
         for filename in names:
             tags = self._types_for_file(filename)
             if (
@@ -95,24 +95,24 @@ class Classifier:
                     (not types_or or tags & types_or) and
                     not tags & exclude_types
             ):
-                ret.append(filename)
-        return ret
+                yield filename
 
-    def filenames_for_hook(self, hook: Hook) -> tuple[str, ...]:
-        names = self.filenames
-        names = filter_by_include_exclude(names, hook.files, hook.exclude)
-        names = self.by_types(
-            names,
+    def filenames_for_hook(self, hook: Hook) -> Generator[str]:
+        return self.by_types(
+            filter_by_include_exclude(
+                self.filenames,
+                hook.files,
+                hook.exclude,
+            ),
             hook.types,
             hook.types_or,
             hook.exclude_types,
         )
-        return tuple(names)
 
     @classmethod
     def from_config(
             cls,
-            filenames: Collection[str],
+            filenames: Iterable[str],
             include: str,
             exclude: str,
     ) -> Classifier:
@@ -121,7 +121,7 @@ class Classifier:
         # this also makes improperly quoted shell-based hooks work better
         # see #1173
         if os.altsep == '/' and os.sep == '\\':
-            filenames = [f.replace(os.sep, os.altsep) for f in filenames]
+            filenames = (f.replace(os.sep, os.altsep) for f in filenames)
         filenames = filter_by_include_exclude(filenames, include, exclude)
         return Classifier(filenames)
 
@@ -148,7 +148,7 @@ def _run_single_hook(
         verbose: bool,
         use_color: bool,
 ) -> tuple[bool, bytes]:
-    filenames = classifier.filenames_for_hook(hook)
+    filenames = tuple(classifier.filenames_for_hook(hook))
 
     if hook.id in skips or hook.alias in skips:
         output.write(
@@ -187,10 +187,19 @@ def _run_single_hook(
 
         if not hook.pass_filenames:
             filenames = ()
-        time_before = time.time()
+        time_before = time.monotonic()
         language = languages[hook.language]
-        retcode, out = language.run_hook(hook, filenames, use_color)
-        duration = round(time.time() - time_before, 2) or 0
+        with language.in_env(hook.prefix, hook.language_version):
+            retcode, out = language.run_hook(
+                hook.prefix,
+                hook.entry,
+                hook.args,
+                filenames,
+                is_local=hook.src == 'local',
+                require_serial=hook.require_serial,
+                color=use_color,
+            )
+        duration = round(time.monotonic() - time_before, 2) or 0
         diff_after = _get_diff()
 
         # if the hook makes changes, fail the commit
@@ -241,10 +250,11 @@ def _compute_cols(hooks: Sequence[Hook]) -> int:
     return max(cols, 80)
 
 
-def _all_filenames(args: argparse.Namespace) -> Collection[str]:
+def _all_filenames(args: argparse.Namespace) -> Iterable[str]:
     # these hooks do not operate on files
     if args.hook_stage in {
         'post-checkout', 'post-commit', 'post-merge', 'post-rewrite',
+        'pre-rebase',
     }:
         return ()
     elif args.hook_stage in {'prepare-commit-msg', 'commit-msg'}:
@@ -263,7 +273,8 @@ def _all_filenames(args: argparse.Namespace) -> Collection[str]:
 
 def _get_diff() -> bytes:
     _, out, _ = cmd_output_b(
-        'git', 'diff', '--no-ext-diff', '--ignore-submodules', retcode=None,
+        'git', 'diff', '--no-ext-diff', '--no-textconv', '--ignore-submodules',
+        check=False,
     )
     return out
 
@@ -287,7 +298,7 @@ def _run_hooks(
             verbose=args.verbose, use_color=args.color,
         )
         retval |= current_retval
-        if retval and (config['fail_fast'] or hook.fail_fast):
+        if current_retval and (config['fail_fast'] or hook.fail_fast):
             break
     if retval and args.show_diff_on_failure and prior_diff:
         if args.all_files:
@@ -317,8 +328,7 @@ def _has_unmerged_paths() -> bool:
 
 def _has_unstaged_config(config_file: str) -> bool:
     retcode, _, _ = cmd_output_b(
-        'git', 'diff', '--no-ext-diff', '--exit-code', config_file,
-        retcode=None,
+        'git', 'diff', '--quiet', '--no-ext-diff', config_file, check=False,
     )
     # be explicit, other git errors don't mean it has an unstaged config.
     return retcode == 1
@@ -333,7 +343,7 @@ def run(
     stash = not args.all_files and not args.files
 
     # Check if we have unresolved merge conflict files and fail fast.
-    if _has_unmerged_paths():
+    if stash and _has_unmerged_paths():
         logger.error('Unmerged files.  Resolve before committing.')
         return 1
     if bool(args.from_ref) != bool(args.to_ref):
@@ -380,6 +390,10 @@ def run(
         environ['PRE_COMMIT_FROM_REF'] = args.from_ref
         environ['PRE_COMMIT_TO_REF'] = args.to_ref
 
+    if args.pre_rebase_upstream and args.pre_rebase_branch:
+        environ['PRE_COMMIT_PRE_REBASE_UPSTREAM'] = args.pre_rebase_upstream
+        environ['PRE_COMMIT_PRE_REBASE_BRANCH'] = args.pre_rebase_branch
+
     if (
         args.remote_name and args.remote_url and
         args.remote_branch and args.local_branch
@@ -420,7 +434,11 @@ def run(
             return 1
 
         skips = _get_skips(environ)
-        to_install = [hook for hook in hooks if hook.id not in skips]
+        to_install = [
+            hook
+            for hook in hooks
+            if hook.id not in skips and hook.alias not in skips
+        ]
         install_hook_envs(to_install, store)
 
         return _run_hooks(config, hooks, skips, args)

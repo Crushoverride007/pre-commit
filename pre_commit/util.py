@@ -2,35 +2,18 @@ from __future__ import annotations
 
 import contextlib
 import errno
-import functools
 import importlib.resources
 import os.path
 import shutil
 import stat
 import subprocess
 import sys
-import tempfile
+from collections.abc import Generator
 from types import TracebackType
 from typing import Any
 from typing import Callable
-from typing import Generator
-from typing import IO
-
-import yaml
 
 from pre_commit import parse_shebang
-
-Loader = getattr(yaml, 'CSafeLoader', yaml.SafeLoader)
-yaml_load = functools.partial(yaml.load, Loader=Loader)
-Dumper = getattr(yaml, 'CSafeDumper', yaml.SafeDumper)
-
-
-def yaml_dump(o: Any, **kwargs: Any) -> str:
-    # when python/mypy#1484 is solved, this can be `functools.partial`
-    return yaml.dump(
-        o, Dumper=Dumper, default_flow_style=False, indent=4, sort_keys=False,
-        **kwargs,
-    )
 
 
 def force_bytes(exc: Any) -> bytes:
@@ -42,7 +25,7 @@ def force_bytes(exc: Any) -> bytes:
 
 
 @contextlib.contextmanager
-def clean_path_on_failure(path: str) -> Generator[None, None, None]:
+def clean_path_on_failure(path: str) -> Generator[None]:
     """Cleans up the directory on an exceptional failure."""
     try:
         yield
@@ -52,24 +35,9 @@ def clean_path_on_failure(path: str) -> Generator[None, None, None]:
         raise
 
 
-@contextlib.contextmanager
-def tmpdir() -> Generator[str, None, None]:
-    """Contextmanager to create a temporary directory.  It will be cleaned up
-    afterwards.
-    """
-    tempdir = tempfile.mkdtemp()
-    try:
-        yield tempdir
-    finally:
-        rmtree(tempdir)
-
-
-def resource_bytesio(filename: str) -> IO[bytes]:
-    return importlib.resources.open_binary('pre_commit.resources', filename)
-
-
 def resource_text(filename: str) -> str:
-    return importlib.resources.read_text('pre_commit.resources', filename)
+    files = importlib.resources.files('pre_commit.resources')
+    return files.joinpath(filename).read_text()
 
 
 def make_executable(filename: str) -> None:
@@ -83,28 +51,25 @@ class CalledProcessError(RuntimeError):
             self,
             returncode: int,
             cmd: tuple[str, ...],
-            expected_returncode: int,
             stdout: bytes,
             stderr: bytes | None,
     ) -> None:
-        super().__init__(returncode, cmd, expected_returncode, stdout, stderr)
+        super().__init__(returncode, cmd, stdout, stderr)
         self.returncode = returncode
         self.cmd = cmd
-        self.expected_returncode = expected_returncode
         self.stdout = stdout
         self.stderr = stderr
 
     def __bytes__(self) -> bytes:
         def _indent_or_none(part: bytes | None) -> bytes:
             if part:
-                return b'\n    ' + part.replace(b'\n', b'\n    ')
+                return b'\n    ' + part.replace(b'\n', b'\n    ').rstrip()
             else:
                 return b' (none)'
 
         return b''.join((
             f'command: {self.cmd!r}\n'.encode(),
             f'return code: {self.returncode}\n'.encode(),
-            f'expected return code: {self.expected_returncode}\n'.encode(),
             b'stdout:', _indent_or_none(self.stdout), b'\n',
             b'stderr:', _indent_or_none(self.stderr),
         ))
@@ -124,13 +89,13 @@ def _oserror_to_output(e: OSError) -> tuple[int, bytes, None]:
 
 def cmd_output_b(
         *cmd: str,
-        retcode: int | None = 0,
+        check: bool = True,
         **kwargs: Any,
 ) -> tuple[int, bytes, bytes | None]:
     _setdefault_kwargs(kwargs)
 
     try:
-        cmd = parse_shebang.normalize_cmd(cmd)
+        cmd = parse_shebang.normalize_cmd(cmd, env=kwargs.get('env'))
     except parse_shebang.ExecutableNotFoundError as e:
         returncode, stdout_b, stderr_b = e.to_output()
     else:
@@ -142,8 +107,8 @@ def cmd_output_b(
             stdout_b, stderr_b = proc.communicate()
             returncode = proc.returncode
 
-    if retcode is not None and retcode != returncode:
-        raise CalledProcessError(returncode, cmd, retcode, stdout_b, stderr_b)
+    if check and returncode:
+        raise CalledProcessError(returncode, cmd, stdout_b, stderr_b)
 
     return returncode, stdout_b, stderr_b
 
@@ -155,7 +120,7 @@ def cmd_output(*cmd: str, **kwargs: Any) -> tuple[int, str, str | None]:
     return returncode, stdout, stderr
 
 
-if os.name != 'nt':  # pragma: win32 no cover
+if sys.platform != 'win32':  # pragma: win32 no cover
     from os import openpty
     import termios
 
@@ -196,10 +161,10 @@ if os.name != 'nt':  # pragma: win32 no cover
 
     def cmd_output_p(
             *cmd: str,
-            retcode: int | None = 0,
+            check: bool = True,
             **kwargs: Any,
     ) -> tuple[int, bytes, bytes | None]:
-        assert retcode is None
+        assert check is False
         assert kwargs['stderr'] == subprocess.STDOUT, kwargs['stderr']
         _setdefault_kwargs(kwargs)
 
@@ -237,29 +202,37 @@ else:  # pragma: no cover
     cmd_output_p = cmd_output_b
 
 
-def rmtree(path: str) -> None:
-    """On windows, rmtree fails for readonly dirs."""
-    def handle_remove_readonly(
-            func: Callable[..., Any],
-            path: str,
-            exc: tuple[type[OSError], OSError, TracebackType],
+def _handle_readonly(
+        func: Callable[[str], object],
+        path: str,
+        exc: BaseException,
+) -> None:
+    if (
+            func in (os.rmdir, os.remove, os.unlink) and
+            isinstance(exc, OSError) and
+            exc.errno in {errno.EACCES, errno.EPERM}
+    ):
+        for p in (path, os.path.dirname(path)):
+            os.chmod(p, os.stat(p).st_mode | stat.S_IWUSR)
+        func(path)
+    else:
+        raise
+
+
+if sys.version_info < (3, 12):  # pragma: <3.12 cover
+    def _handle_readonly_old(
+        func: Callable[[str], object],
+        path: str,
+        excinfo: tuple[type[BaseException], BaseException, TracebackType],
     ) -> None:
-        excvalue = exc[1]
-        if (
-                func in (os.rmdir, os.remove, os.unlink) and
-                excvalue.errno in {errno.EACCES, errno.EPERM}
-        ):
-            for p in (path, os.path.dirname(path)):
-                os.chmod(p, os.stat(p).st_mode | stat.S_IWUSR)
-            func(path)
-        else:
-            raise
-    shutil.rmtree(path, ignore_errors=False, onerror=handle_remove_readonly)
+        return _handle_readonly(func, path, excinfo[1])
 
-
-def parse_version(s: str) -> tuple[int, ...]:
-    """poor man's version comparison"""
-    return tuple(int(p) for p in s.split('.'))
+    def rmtree(path: str) -> None:
+        shutil.rmtree(path, ignore_errors=False, onerror=_handle_readonly_old)
+else:  # pragma: >=3.12 cover
+    def rmtree(path: str) -> None:
+        """On windows, rmtree fails for readonly dirs."""
+        shutil.rmtree(path, ignore_errors=False, onexc=_handle_readonly)
 
 
 def win_exe(s: str) -> str:

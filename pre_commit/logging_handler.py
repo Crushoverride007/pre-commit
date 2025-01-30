@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from typing import Generator
+from collections.abc import Generator
 
 from pre_commit import color
 from pre_commit import output
@@ -32,7 +32,7 @@ class LoggingHandler(logging.Handler):
 
 
 @contextlib.contextmanager
-def logging_handler(use_color: bool) -> Generator[None, None, None]:
+def logging_handler(use_color: bool) -> Generator[None]:
     handler = LoggingHandler(use_color)
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)

@@ -3,20 +3,18 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from typing import Sequence
+from collections.abc import Sequence
 
-import pre_commit.constants as C
-from pre_commit.hook import Hook
-from pre_commit.languages import helpers
+from pre_commit import lang_base
 from pre_commit.prefix import Prefix
 from pre_commit.util import CalledProcessError
-from pre_commit.util import clean_path_on_failure
 from pre_commit.util import cmd_output_b
 
 ENVIRONMENT_DIR = 'docker'
 PRE_COMMIT_LABEL = 'PRE_COMMIT'
-get_default_version = helpers.basic_get_default_version
-health_check = helpers.basic_health_check
+get_default_version = lang_base.basic_get_default_version
+health_check = lang_base.basic_health_check
+in_env = lang_base.no_env  # no special environment for docker
 
 
 def _is_in_docker() -> bool:
@@ -86,24 +84,21 @@ def build_docker_image(
         cmd += ('--pull',)
     # This must come last for old versions of docker.  See #477
     cmd += ('.',)
-    helpers.run_setup_cmd(prefix, cmd)
+    lang_base.setup_cmd(prefix, cmd)
 
 
 def install_environment(
         prefix: Prefix, version: str, additional_dependencies: Sequence[str],
 ) -> None:  # pragma: win32 no cover
-    helpers.assert_version_default('docker', version)
-    helpers.assert_no_additional_deps('docker', additional_dependencies)
+    lang_base.assert_version_default('docker', version)
+    lang_base.assert_no_additional_deps('docker', additional_dependencies)
 
-    directory = prefix.path(
-        helpers.environment_dir(ENVIRONMENT_DIR, C.DEFAULT),
-    )
+    directory = lang_base.environment_dir(prefix, ENVIRONMENT_DIR, version)
 
     # Docker doesn't really have relevant disk environment, but pre-commit
     # still needs to cleanup its state files on failure
-    with clean_path_on_failure(directory):
-        build_docker_image(prefix, pull=True)
-        os.mkdir(directory)
+    build_docker_image(prefix, pull=True)
+    os.mkdir(directory)
 
 
 def get_docker_user() -> tuple[str, ...]:  # pragma: win32 no cover
@@ -113,10 +108,15 @@ def get_docker_user() -> tuple[str, ...]:  # pragma: win32 no cover
         return ()
 
 
-def docker_cmd() -> tuple[str, ...]:  # pragma: win32 no cover
+def get_docker_tty(*, color: bool) -> tuple[str, ...]:  # pragma: win32 no cover  # noqa: E501
+    return (('--tty',) if color else ())
+
+
+def docker_cmd(*, color: bool) -> tuple[str, ...]:  # pragma: win32 no cover
     return (
         'docker', 'run',
         '--rm',
+        *get_docker_tty(color=color),
         *get_docker_user(),
         # https://docs.docker.com/engine/reference/commandline/run/#mount-volumes-from-container-volumes-from
         # The `Z` option tells Docker to label the content with a private
@@ -127,16 +127,25 @@ def docker_cmd() -> tuple[str, ...]:  # pragma: win32 no cover
 
 
 def run_hook(
-        hook: Hook,
+        prefix: Prefix,
+        entry: str,
+        args: Sequence[str],
         file_args: Sequence[str],
+        *,
+        is_local: bool,
+        require_serial: bool,
         color: bool,
 ) -> tuple[int, bytes]:  # pragma: win32 no cover
     # Rebuild the docker image in case it has gone missing, as many people do
     # automated cleanup of docker images.
-    build_docker_image(hook.prefix, pull=False)
+    build_docker_image(prefix, pull=False)
 
-    entry_exe, *cmd_rest = hook.cmd
+    entry_exe, *cmd_rest = lang_base.hook_cmd(entry, args)
 
-    entry_tag = ('--entrypoint', entry_exe, docker_tag(hook.prefix))
-    cmd = (*docker_cmd(), *entry_tag, *cmd_rest)
-    return helpers.run_xargs(hook, cmd, file_args, color=color)
+    entry_tag = ('--entrypoint', entry_exe, docker_tag(prefix))
+    return lang_base.run_xargs(
+        (*docker_cmd(color=color), *entry_tag, *cmd_rest),
+        file_args,
+        require_serial=require_serial,
+        color=color,
+    )

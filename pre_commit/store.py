@@ -5,11 +5,12 @@ import logging
 import os.path
 import sqlite3
 import tempfile
+from collections.abc import Generator
+from collections.abc import Sequence
 from typing import Callable
-from typing import Generator
-from typing import Sequence
 
 import pre_commit.constants as C
+from pre_commit import clientlib
 from pre_commit import file_lock
 from pre_commit import git
 from pre_commit.util import CalledProcessError
@@ -34,6 +35,26 @@ def _get_default_directory() -> str:
         'pre-commit',
     )
     return os.path.realpath(ret)
+
+
+_LOCAL_RESOURCES = (
+    'Cargo.toml', 'main.go', 'go.mod', 'main.rs', '.npmignore',
+    'package.json', 'pre-commit-package-dev-1.rockspec',
+    'pre_commit_placeholder_package.gemspec', 'setup.py',
+    'environment.yml', 'Makefile.PL', 'pubspec.yaml',
+    'renv.lock', 'renv/activate.R', 'renv/LICENSE.renv',
+)
+
+
+def _make_local_repo(directory: str) -> None:
+    for resource in _LOCAL_RESOURCES:
+        resource_dirname, resource_basename = os.path.split(resource)
+        contents = resource_text(f'empty_template_{resource_basename}')
+        target_dir = os.path.join(directory, resource_dirname)
+        target_file = os.path.join(target_dir, resource_basename)
+        os.makedirs(target_dir, exist_ok=True)
+        with open(target_file, 'w') as f:
+            f.write(contents)
 
 
 class Store:
@@ -81,7 +102,7 @@ class Store:
             os.replace(tmpfile, self.db_path)
 
     @contextlib.contextmanager
-    def exclusive_lock(self) -> Generator[None, None, None]:
+    def exclusive_lock(self) -> Generator[None]:
         def blocked_cb() -> None:  # pragma: no cover (tests are in-process)
             logger.info('Locking pre-commit directory')
 
@@ -92,7 +113,7 @@ class Store:
     def connect(
             self,
             db_path: str | None = None,
-    ) -> Generator[sqlite3.Connection, None, None]:
+    ) -> Generator[sqlite3.Connection]:
         db_path = db_path or self.db_path
         # sqlite doesn't close its fd with its contextmanager >.<
         # contextlib.closing fixes this.
@@ -105,7 +126,7 @@ class Store:
     @classmethod
     def db_repo_name(cls, repo: str, deps: Sequence[str]) -> str:
         if deps:
-            return f'{repo}:{",".join(sorted(deps))}'
+            return f'{repo}:{",".join(deps)}'
         else:
             return repo
 
@@ -116,6 +137,7 @@ class Store:
             deps: Sequence[str],
             make_strategy: Callable[[str], None],
     ) -> str:
+        original_repo = repo
         repo = self.db_repo_name(repo, deps)
 
         def _get_result() -> str | None:
@@ -148,6 +170,9 @@ class Store:
                     'INSERT INTO repos (repo, ref, path) VALUES (?, ?, ?)',
                     [repo, ref, directory],
                 )
+
+            clientlib.warn_for_stages_on_repo_init(original_repo, directory)
+
         return directory
 
     def _complete_clone(self, ref: str, git_cmd: Callable[..., None]) -> None:
@@ -185,37 +210,9 @@ class Store:
 
         return self._new_repo(repo, ref, deps, clone_strategy)
 
-    LOCAL_RESOURCES = (
-        'Cargo.toml', 'main.go', 'go.mod', 'main.rs', '.npmignore',
-        'package.json', 'pre-commit-package-dev-1.rockspec',
-        'pre_commit_placeholder_package.gemspec', 'setup.py',
-        'environment.yml', 'Makefile.PL', 'pubspec.yaml',
-        'renv.lock', 'renv/activate.R', 'renv/LICENSE.renv',
-    )
-
     def make_local(self, deps: Sequence[str]) -> str:
-        def make_local_strategy(directory: str) -> None:
-            for resource in self.LOCAL_RESOURCES:
-                resource_dirname, resource_basename = os.path.split(resource)
-                contents = resource_text(f'empty_template_{resource_basename}')
-                target_dir = os.path.join(directory, resource_dirname)
-                target_file = os.path.join(target_dir, resource_basename)
-                os.makedirs(target_dir, exist_ok=True)
-                with open(target_file, 'w') as f:
-                    f.write(contents)
-
-            env = git.no_git_env()
-
-            # initialize the git repository so it looks more like cloned repos
-            def _git_cmd(*args: str) -> None:
-                cmd_output_b('git', *args, cwd=directory, env=env)
-
-            git.init_repo(directory, '<<unknown>>')
-            _git_cmd('add', '.')
-            git.commit(repo=directory)
-
         return self._new_repo(
-            'local', C.LOCAL_REPO_VERSION, deps, make_local_strategy,
+            'local', C.LOCAL_REPO_VERSION, deps, _make_local_repo,
         )
 
     def _create_config_table(self, db: sqlite3.Connection) -> None:

@@ -1,30 +1,41 @@
 from __future__ import annotations
 
-import argparse
 import functools
 import logging
+import os.path
 import re
 import shlex
 import sys
+from collections.abc import Sequence
 from typing import Any
-from typing import Sequence
+from typing import NamedTuple
 
 import cfgv
 from identify.identify import ALL_TAGS
 
 import pre_commit.constants as C
-from pre_commit.color import add_color_option
-from pre_commit.commands.validate_config import validate_config
-from pre_commit.commands.validate_manifest import validate_manifest
+from pre_commit.all_languages import language_names
 from pre_commit.errors import FatalError
-from pre_commit.languages.all import all_languages
-from pre_commit.logging_handler import logging_handler
-from pre_commit.util import parse_version
-from pre_commit.util import yaml_load
+from pre_commit.yaml import yaml_load
 
 logger = logging.getLogger('pre_commit')
 
 check_string_regex = cfgv.check_and(cfgv.check_string, cfgv.check_regex)
+
+HOOK_TYPES = (
+    'commit-msg',
+    'post-checkout',
+    'post-commit',
+    'post-merge',
+    'post-rewrite',
+    'pre-commit',
+    'pre-merge-commit',
+    'pre-push',
+    'pre-rebase',
+    'prepare-commit-msg',
+)
+# `manual` is not invoked by any installed git hook.  See #719
+STAGES = (*HOOK_TYPES, 'manual')
 
 
 def check_type_tag(tag: str) -> None:
@@ -33,6 +44,11 @@ def check_type_tag(tag: str) -> None:
             f'Type tag {tag!r} is not recognized.  '
             f'Try upgrading identify and pre-commit?',
         )
+
+
+def parse_version(s: str) -> tuple[int, ...]:
+    """poor man's version comparison"""
+    return tuple(int(p) for p in s.split('.'))
 
 
 def check_min_version(version: str) -> None:
@@ -44,21 +60,149 @@ def check_min_version(version: str) -> None:
         )
 
 
-def _make_argparser(filenames_help: str) -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser()
-    parser.add_argument('filenames', nargs='*', help=filenames_help)
-    parser.add_argument('-V', '--version', action='version', version=C.VERSION)
-    add_color_option(parser)
-    return parser
+_STAGES = {
+    'commit': 'pre-commit',
+    'merge-commit': 'pre-merge-commit',
+    'push': 'pre-push',
+}
+
+
+def transform_stage(stage: str) -> str:
+    return _STAGES.get(stage, stage)
+
+
+MINIMAL_MANIFEST_SCHEMA = cfgv.Array(
+    cfgv.Map(
+        'Hook', 'id',
+        cfgv.Required('id', cfgv.check_string),
+        cfgv.Optional('stages', cfgv.check_array(cfgv.check_string), []),
+    ),
+)
+
+
+def warn_for_stages_on_repo_init(repo: str, directory: str) -> None:
+    try:
+        manifest = cfgv.load_from_filename(
+            os.path.join(directory, C.MANIFEST_FILE),
+            schema=MINIMAL_MANIFEST_SCHEMA,
+            load_strategy=yaml_load,
+            exc_tp=InvalidManifestError,
+        )
+    except InvalidManifestError:
+        return  # they'll get a better error message when it actually loads!
+
+    legacy_stages = {}  # sorted set
+    for hook in manifest:
+        for stage in hook.get('stages', ()):
+            if stage in _STAGES:
+                legacy_stages[stage] = True
+
+    if legacy_stages:
+        logger.warning(
+            f'repo `{repo}` uses deprecated stage names '
+            f'({", ".join(legacy_stages)}) which will be removed in a '
+            f'future version.  '
+            f'Hint: often `pre-commit autoupdate --repo {shlex.quote(repo)}` '
+            f'will fix this.  '
+            f'if it does not -- consider reporting an issue to that repo.',
+        )
+
+
+class StagesMigrationNoDefault(NamedTuple):
+    key: str
+    default: Sequence[str]
+
+    def check(self, dct: dict[str, Any]) -> None:
+        if self.key not in dct:
+            return
+
+        val = dct[self.key]
+        cfgv.check_array(cfgv.check_any)(val)
+
+        val = [transform_stage(v) for v in val]
+        cfgv.check_array(cfgv.check_one_of(STAGES))(val)
+
+    def apply_default(self, dct: dict[str, Any]) -> None:
+        if self.key not in dct:
+            return
+        dct[self.key] = [transform_stage(v) for v in dct[self.key]]
+
+    def remove_default(self, dct: dict[str, Any]) -> None:
+        raise NotImplementedError
+
+
+class StagesMigration(StagesMigrationNoDefault):
+    def apply_default(self, dct: dict[str, Any]) -> None:
+        dct.setdefault(self.key, self.default)
+        super().apply_default(dct)
+
+
+class DeprecatedStagesWarning(NamedTuple):
+    key: str
+
+    def check(self, dct: dict[str, Any]) -> None:
+        if self.key not in dct:
+            return
+
+        val = dct[self.key]
+        cfgv.check_array(cfgv.check_any)(val)
+
+        legacy_stages = [stage for stage in val if stage in _STAGES]
+        if legacy_stages:
+            logger.warning(
+                f'hook id `{dct["id"]}` uses deprecated stage names '
+                f'({", ".join(legacy_stages)}) which will be removed in a '
+                f'future version.  '
+                f'run: `pre-commit migrate-config` to automatically fix this.',
+            )
+
+    def apply_default(self, dct: dict[str, Any]) -> None:
+        pass
+
+    def remove_default(self, dct: dict[str, Any]) -> None:
+        raise NotImplementedError
+
+
+class DeprecatedDefaultStagesWarning(NamedTuple):
+    key: str
+
+    def check(self, dct: dict[str, Any]) -> None:
+        if self.key not in dct:
+            return
+
+        val = dct[self.key]
+        cfgv.check_array(cfgv.check_any)(val)
+
+        legacy_stages = [stage for stage in val if stage in _STAGES]
+        if legacy_stages:
+            logger.warning(
+                f'top-level `default_stages` uses deprecated stage names '
+                f'({", ".join(legacy_stages)}) which will be removed in a '
+                f'future version.  '
+                f'run: `pre-commit migrate-config` to automatically fix this.',
+            )
+
+    def apply_default(self, dct: dict[str, Any]) -> None:
+        pass
+
+    def remove_default(self, dct: dict[str, Any]) -> None:
+        raise NotImplementedError
 
 
 MANIFEST_HOOK_DICT = cfgv.Map(
     'Hook', 'id',
 
+    # check first in case it uses some newer, incompatible feature
+    cfgv.Optional(
+        'minimum_pre_commit_version',
+        cfgv.check_and(cfgv.check_string, check_min_version),
+        '0',
+    ),
+
     cfgv.Required('id', cfgv.check_string),
     cfgv.Required('name', cfgv.check_string),
     cfgv.Required('entry', cfgv.check_string),
-    cfgv.Required('language', cfgv.check_one_of(all_languages)),
+    cfgv.Required('language', cfgv.check_one_of(language_names)),
     cfgv.Optional('alias', cfgv.check_string, ''),
 
     cfgv.Optional('files', check_string_regex, ''),
@@ -77,9 +221,8 @@ MANIFEST_HOOK_DICT = cfgv.Map(
     cfgv.Optional('description', cfgv.check_string, ''),
     cfgv.Optional('language_version', cfgv.check_string, C.DEFAULT),
     cfgv.Optional('log_file', cfgv.check_string, ''),
-    cfgv.Optional('minimum_pre_commit_version', cfgv.check_string, '0'),
     cfgv.Optional('require_serial', cfgv.check_bool, False),
-    cfgv.Optional('stages', cfgv.check_array(cfgv.check_one_of(C.STAGES)), []),
+    StagesMigration('stages', []),
     cfgv.Optional('verbose', cfgv.check_bool, False),
 )
 MANIFEST_SCHEMA = cfgv.Array(MANIFEST_HOOK_DICT)
@@ -97,25 +240,11 @@ load_manifest = functools.partial(
 )
 
 
-def validate_manifest_main(argv: Sequence[str] | None = None) -> int:
-    parser = _make_argparser('Manifest filenames.')
-    args = parser.parse_args(argv)
-
-    with logging_handler(args.color):
-        logger.warning(
-            'pre-commit-validate-manifest is deprecated -- '
-            'use `pre-commit validate-manifest` instead.',
-        )
-
-        return validate_manifest(args.filenames)
-
-
 LOCAL = 'local'
 META = 'meta'
 
 
-# should inherit from cfgv.Conditional if sha support is dropped
-class WarnMutableRev(cfgv.ConditionalOptional):
+class WarnMutableRev(cfgv.Conditional):
     def check(self, dct: dict[str, Any]) -> None:
         super().check(dct)
 
@@ -169,36 +298,6 @@ class OptionalSensibleRegexAtTop(cfgv.OptionalNoDefault):
                     fr'{self.key!r} field to forward slashes, so you '
                     fr'can use / instead of {fwd_slash_re}',
                 )
-
-
-class MigrateShaToRev:
-    key = 'rev'
-
-    @staticmethod
-    def _cond(key: str) -> cfgv.Conditional:
-        return cfgv.Conditional(
-            key, cfgv.check_string,
-            condition_key='repo',
-            condition_value=cfgv.NotIn(LOCAL, META),
-            ensure_absent=True,
-        )
-
-    def check(self, dct: dict[str, Any]) -> None:
-        if dct.get('repo') in {LOCAL, META}:
-            self._cond('rev').check(dct)
-            self._cond('sha').check(dct)
-        elif 'sha' in dct and 'rev' in dct:
-            raise cfgv.ValidationError('Cannot specify both sha and rev')
-        elif 'sha' in dct:
-            self._cond('sha').check(dct)
-        else:
-            self._cond('rev').check(dct)
-
-    def apply_default(self, dct: dict[str, Any]) -> None:
-        if 'sha' in dct:
-            dct['rev'] = dct.pop('sha')
-
-    remove_default = cfgv.Required.remove_default
 
 
 def _entry(modname: str) -> str:
@@ -258,6 +357,12 @@ class NotAllowed(cfgv.OptionalNoDefault):
             raise cfgv.ValidationError(f'{self.key!r} cannot be overridden')
 
 
+_COMMON_HOOK_WARNINGS = (
+    OptionalSensibleRegexAtHook('files', cfgv.check_string),
+    OptionalSensibleRegexAtHook('exclude', cfgv.check_string),
+    DeprecatedStagesWarning('stages'),
+)
+
 META_HOOK_DICT = cfgv.Map(
     'Hook', 'id',
     cfgv.Required('id', cfgv.check_string),
@@ -280,6 +385,7 @@ META_HOOK_DICT = cfgv.Map(
         item
         for item in MANIFEST_HOOK_DICT.items
     ),
+    *_COMMON_HOOK_WARNINGS,
 )
 CONFIG_HOOK_DICT = cfgv.Map(
     'Hook', 'id',
@@ -294,9 +400,16 @@ CONFIG_HOOK_DICT = cfgv.Map(
         cfgv.OptionalNoDefault(item.key, item.check_fn)
         for item in MANIFEST_HOOK_DICT.items
         if item.key != 'id'
+        if item.key != 'stages'
     ),
-    OptionalSensibleRegexAtHook('files', cfgv.check_string),
-    OptionalSensibleRegexAtHook('exclude', cfgv.check_string),
+    StagesMigrationNoDefault('stages', []),
+    *_COMMON_HOOK_WARNINGS,
+)
+LOCAL_HOOK_DICT = cfgv.Map(
+    'Hook', 'id',
+
+    *MANIFEST_HOOK_DICT.items,
+    *_COMMON_HOOK_WARNINGS,
 )
 CONFIG_REPO_DICT = cfgv.Map(
     'Repository', 'repo',
@@ -308,7 +421,7 @@ CONFIG_REPO_DICT = cfgv.Map(
         'repo', cfgv.NotIn(LOCAL, META),
     ),
     cfgv.ConditionalRecurse(
-        'hooks', cfgv.Array(MANIFEST_HOOK_DICT),
+        'hooks', cfgv.Array(LOCAL_HOOK_DICT),
         'repo', LOCAL,
     ),
     cfgv.ConditionalRecurse(
@@ -316,47 +429,43 @@ CONFIG_REPO_DICT = cfgv.Map(
         'repo', META,
     ),
 
-    MigrateShaToRev(),
     WarnMutableRev(
-        'rev',
-        cfgv.check_string,
-        '',
-        'repo',
-        cfgv.NotIn(LOCAL, META),
-        True,
+        'rev', cfgv.check_string,
+        condition_key='repo',
+        condition_value=cfgv.NotIn(LOCAL, META),
+        ensure_absent=True,
     ),
     cfgv.WarnAdditionalKeys(('repo', 'rev', 'hooks'), warn_unknown_keys_repo),
 )
 DEFAULT_LANGUAGE_VERSION = cfgv.Map(
     'DefaultLanguageVersion', None,
-    cfgv.NoAdditionalKeys(all_languages),
-    *(cfgv.Optional(x, cfgv.check_string, C.DEFAULT) for x in all_languages),
+    cfgv.NoAdditionalKeys(language_names),
+    *(cfgv.Optional(x, cfgv.check_string, C.DEFAULT) for x in language_names),
 )
 CONFIG_SCHEMA = cfgv.Map(
     'Config', None,
 
-    cfgv.RequiredRecurse('repos', cfgv.Array(CONFIG_REPO_DICT)),
-    cfgv.Optional(
-        'default_install_hook_types',
-        cfgv.check_array(cfgv.check_one_of(C.HOOK_TYPES)),
-        ['pre-commit'],
-    ),
-    cfgv.OptionalRecurse(
-        'default_language_version', DEFAULT_LANGUAGE_VERSION, {},
-    ),
-    cfgv.Optional(
-        'default_stages',
-        cfgv.check_array(cfgv.check_one_of(C.STAGES)),
-        C.STAGES,
-    ),
-    cfgv.Optional('files', check_string_regex, ''),
-    cfgv.Optional('exclude', check_string_regex, '^$'),
-    cfgv.Optional('fail_fast', cfgv.check_bool, False),
+    # check first in case it uses some newer, incompatible feature
     cfgv.Optional(
         'minimum_pre_commit_version',
         cfgv.check_and(cfgv.check_string, check_min_version),
         '0',
     ),
+
+    cfgv.RequiredRecurse('repos', cfgv.Array(CONFIG_REPO_DICT)),
+    cfgv.Optional(
+        'default_install_hook_types',
+        cfgv.check_array(cfgv.check_one_of(HOOK_TYPES)),
+        ['pre-commit'],
+    ),
+    cfgv.OptionalRecurse(
+        'default_language_version', DEFAULT_LANGUAGE_VERSION, {},
+    ),
+    StagesMigration('default_stages', STAGES),
+    DeprecatedDefaultStagesWarning('default_stages'),
+    cfgv.Optional('files', check_string_regex, ''),
+    cfgv.Optional('exclude', check_string_regex, '^$'),
+    cfgv.Optional('fail_fast', cfgv.check_bool, False),
     cfgv.WarnAdditionalKeys(
         (
             'repos',
@@ -383,35 +492,9 @@ class InvalidConfigError(FatalError):
     pass
 
 
-def ordered_load_normalize_legacy_config(contents: str) -> dict[str, Any]:
-    data = yaml_load(contents)
-    if isinstance(data, list):
-        logger.warning(
-            'normalizing pre-commit configuration to a top-level map.  '
-            'support for top level list will be removed in a future version.  '
-            'run: `pre-commit migrate-config` to automatically fix this.',
-        )
-        return {'repos': data}
-    else:
-        return data
-
-
 load_config = functools.partial(
     cfgv.load_from_filename,
     schema=CONFIG_SCHEMA,
-    load_strategy=ordered_load_normalize_legacy_config,
+    load_strategy=yaml_load,
     exc_tp=InvalidConfigError,
 )
-
-
-def validate_config_main(argv: Sequence[str] | None = None) -> int:
-    parser = _make_argparser('Config filenames.')
-    args = parser.parse_args(argv)
-
-    with logging_handler(args.color):
-        logger.warning(
-            'pre-commit-validate-config is deprecated -- '
-            'use `pre-commit validate-config` instead.',
-        )
-
-        return validate_config(args.filenames)

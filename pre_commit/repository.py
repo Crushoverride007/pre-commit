@@ -3,35 +3,39 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Sequence
 from typing import Any
-from typing import Sequence
 
 import pre_commit.constants as C
+from pre_commit.all_languages import languages
 from pre_commit.clientlib import load_manifest
 from pre_commit.clientlib import LOCAL
 from pre_commit.clientlib import META
 from pre_commit.hook import Hook
-from pre_commit.languages.all import languages
-from pre_commit.languages.helpers import environment_dir
+from pre_commit.lang_base import environment_dir
 from pre_commit.prefix import Prefix
 from pre_commit.store import Store
-from pre_commit.util import parse_version
+from pre_commit.util import clean_path_on_failure
 from pre_commit.util import rmtree
 
 
 logger = logging.getLogger('pre_commit')
 
 
+def _state_filename_v1(venv: str) -> str:
+    return os.path.join(venv, '.install_state_v1')
+
+
+def _state_filename_v2(venv: str) -> str:
+    return os.path.join(venv, '.install_state_v2')
+
+
 def _state(additional_deps: Sequence[str]) -> object:
-    return {'additional_dependencies': sorted(additional_deps)}
+    return {'additional_dependencies': additional_deps}
 
 
-def _state_filename(prefix: Prefix, venv: str) -> str:
-    return prefix.path(venv, f'.install_state_v{C.INSTALLED_STATE_VERSION}')
-
-
-def _read_state(prefix: Prefix, venv: str) -> object | None:
-    filename = _state_filename(prefix, venv)
+def _read_state(venv: str) -> object | None:
+    filename = _state_filename_v1(venv)
     if not os.path.exists(filename):
         return None
     else:
@@ -39,26 +43,22 @@ def _read_state(prefix: Prefix, venv: str) -> object | None:
             return json.load(f)
 
 
-def _write_state(prefix: Prefix, venv: str, state: object) -> None:
-    state_filename = _state_filename(prefix, venv)
-    staging = f'{state_filename}staging'
-    with open(staging, 'w') as state_file:
-        state_file.write(json.dumps(state))
-    # Move the file into place atomically to indicate we've installed
-    os.replace(staging, state_filename)
-
-
 def _hook_installed(hook: Hook) -> bool:
     lang = languages[hook.language]
-    venv = environment_dir(lang.ENVIRONMENT_DIR, hook.language_version)
+    if lang.ENVIRONMENT_DIR is None:
+        return True
+
+    venv = environment_dir(
+        hook.prefix,
+        lang.ENVIRONMENT_DIR,
+        hook.language_version,
+    )
     return (
-        venv is None or (
-            (
-                _read_state(hook.prefix, venv) ==
-                _state(hook.additional_dependencies)
-            ) and
-            not lang.health_check(hook.prefix, hook.language_version)
-        )
+        (
+            os.path.exists(_state_filename_v2(venv)) or
+            _read_state(venv) == _state(hook.additional_dependencies)
+        ) and
+        not lang.health_check(hook.prefix, hook.language_version)
     )
 
 
@@ -69,26 +69,41 @@ def _hook_install(hook: Hook) -> None:
 
     lang = languages[hook.language]
     assert lang.ENVIRONMENT_DIR is not None
-    venv = environment_dir(lang.ENVIRONMENT_DIR, hook.language_version)
+
+    venv = environment_dir(
+        hook.prefix,
+        lang.ENVIRONMENT_DIR,
+        hook.language_version,
+    )
 
     # There's potentially incomplete cleanup from previous runs
     # Clean it up!
-    if hook.prefix.exists(venv):
-        rmtree(hook.prefix.path(venv))
+    if os.path.exists(venv):
+        rmtree(venv)
 
-    lang.install_environment(
-        hook.prefix, hook.language_version, hook.additional_dependencies,
-    )
-    health_error = lang.health_check(hook.prefix, hook.language_version)
-    if health_error:
-        raise AssertionError(
-            f'BUG: expected environment for {hook.language} to be healthy '
-            f'immediately after install, please open an issue describing '
-            f'your environment\n\n'
-            f'more info:\n\n{health_error}',
+    with clean_path_on_failure(venv):
+        lang.install_environment(
+            hook.prefix, hook.language_version, hook.additional_dependencies,
         )
-    # Write our state to indicate we're installed
-    _write_state(hook.prefix, venv, _state(hook.additional_dependencies))
+        health_error = lang.health_check(hook.prefix, hook.language_version)
+        if health_error:
+            raise AssertionError(
+                f'BUG: expected environment for {hook.language} to be healthy '
+                f'immediately after install, please open an issue describing '
+                f'your environment\n\n'
+                f'more info:\n\n{health_error}',
+            )
+
+        # TODO: remove v1 state writing, no longer needed after pre-commit 3.0
+        # Write our state to indicate we're installed
+        state_filename = _state_filename_v1(venv)
+        staging = f'{state_filename}staging'
+        with open(staging, 'w') as state_file:
+            state_file.write(json.dumps(_state(hook.additional_dependencies)))
+        # Move the file into place atomically to indicate we've installed
+        os.replace(staging, state_filename)
+
+        open(_state_filename_v2(venv), 'a+').close()
 
 
 def _hook(
@@ -98,15 +113,6 @@ def _hook(
     ret, rest = dict(hook_dicts[0]), hook_dicts[1:]
     for dct in rest:
         ret.update(dct)
-
-    version = ret['minimum_pre_commit_version']
-    if parse_version(version) > parse_version(C.VERSION):
-        logger.error(
-            f'The hook `{ret["id"]}` requires pre-commit version {version} '
-            f'but version {C.VERSION} is installed.  '
-            f'Perhaps run `pip install --upgrade pre-commit`.',
-        )
-        exit(1)
 
     lang = ret['language']
     if ret['language_version'] == C.DEFAULT:

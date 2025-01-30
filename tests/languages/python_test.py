@@ -12,6 +12,7 @@ from pre_commit.languages import python
 from pre_commit.prefix import Prefix
 from pre_commit.util import make_executable
 from pre_commit.util import win_exe
+from testing.language_helpers import run_language
 
 
 def test_read_pyvenv_cfg(tmpdir):
@@ -35,10 +36,10 @@ def test_read_pyvenv_cfg_non_utf8(tmpdir):
 
 def test_norm_version_expanduser():
     home = os.path.expanduser('~')
-    if os.name == 'nt':  # pragma: nt cover
+    if sys.platform == 'win32':  # pragma: win32 cover
         path = r'~\python343'
         expected_path = fr'{home}\python343'
-    else:  # pragma: nt no cover
+    else:  # pragma: win32 no cover
         path = '~/.pyenv/versions/3.4.3/bin/python'
         expected_path = f'{home}/.pyenv/versions/3.4.3/bin/python'
     result = python.norm_version(path)
@@ -210,3 +211,76 @@ def test_unhealthy_then_replaced(python_dir):
     os.replace(f'{py_exe}.tmp', py_exe)
 
     assert python.health_check(prefix, C.DEFAULT) is None
+
+
+def test_language_versioned_python_hook(tmp_path):
+    setup_py = '''\
+from setuptools import setup
+setup(
+    name='example',
+    py_modules=['mod'],
+    entry_points={'console_scripts': ['myexe=mod:main']},
+)
+'''
+    tmp_path.joinpath('setup.py').write_text(setup_py)
+    tmp_path.joinpath('mod.py').write_text('def main(): print("ohai")')
+
+    # we patch this to force virtualenv executing with `-p` since we can't
+    # reliably have multiple pythons available in CI
+    with mock.patch.object(
+            python,
+            '_sys_executable_matches',
+            return_value=False,
+    ):
+        assert run_language(tmp_path, python, 'myexe') == (0, b'ohai\n')
+
+
+def _make_hello_hello(tmp_path):
+    setup_py = '''\
+from setuptools import setup
+
+setup(
+    name='socks',
+    version='0.0.0',
+    py_modules=['socks'],
+    entry_points={'console_scripts': ['socks = socks:main']},
+)
+'''
+
+    main_py = '''\
+import sys
+
+def main():
+    print(repr(sys.argv[1:]))
+    print('hello hello')
+    return 0
+'''
+    tmp_path.joinpath('setup.py').write_text(setup_py)
+    tmp_path.joinpath('socks.py').write_text(main_py)
+
+
+def test_simple_python_hook(tmp_path):
+    _make_hello_hello(tmp_path)
+
+    ret = run_language(tmp_path, python, 'socks', [os.devnull])
+    assert ret == (0, f'[{os.devnull!r}]\nhello hello\n'.encode())
+
+
+def test_simple_python_hook_default_version(tmp_path):
+    # make sure that this continues to work for platforms where default
+    # language detection does not work
+    with mock.patch.object(
+            python,
+            'get_default_version',
+            return_value=C.DEFAULT,
+    ):
+        test_simple_python_hook(tmp_path)
+
+
+def test_python_hook_weird_setup_cfg(tmp_path):
+    _make_hello_hello(tmp_path)
+    setup_cfg = '[install]\ninstall_scripts=/usr/sbin'
+    tmp_path.joinpath('setup.cfg').write_text(setup_cfg)
+
+    ret = run_language(tmp_path, python, 'socks', [os.devnull])
+    assert ret == (0, f'[{os.devnull!r}]\nhello hello\n'.encode())

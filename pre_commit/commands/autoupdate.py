@@ -1,75 +1,85 @@
 from __future__ import annotations
 
+import concurrent.futures
 import os.path
 import re
+import tempfile
+from collections.abc import Sequence
 from typing import Any
 from typing import NamedTuple
-from typing import Sequence
 
 import pre_commit.constants as C
 from pre_commit import git
 from pre_commit import output
+from pre_commit import xargs
 from pre_commit.clientlib import InvalidManifestError
 from pre_commit.clientlib import load_config
 from pre_commit.clientlib import load_manifest
 from pre_commit.clientlib import LOCAL
 from pre_commit.clientlib import META
 from pre_commit.commands.migrate_config import migrate_config
-from pre_commit.store import Store
 from pre_commit.util import CalledProcessError
 from pre_commit.util import cmd_output
 from pre_commit.util import cmd_output_b
-from pre_commit.util import tmpdir
-from pre_commit.util import yaml_dump
-from pre_commit.util import yaml_load
+from pre_commit.yaml import yaml_dump
+from pre_commit.yaml import yaml_load
 
 
 class RevInfo(NamedTuple):
     repo: str
     rev: str
-    frozen: str | None
+    frozen: str | None = None
+    hook_ids: frozenset[str] = frozenset()
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> RevInfo:
-        return cls(config['repo'], config['rev'], None)
+        return cls(config['repo'], config['rev'])
 
     def update(self, tags_only: bool, freeze: bool) -> RevInfo:
-        git_cmd = ('git', *git.NO_FS_MONITOR)
+        with tempfile.TemporaryDirectory() as tmp:
+            _git = ('git', *git.NO_FS_MONITOR, '-C', tmp)
 
-        if tags_only:
-            tag_cmd = (
-                *git_cmd, 'describe',
-                'FETCH_HEAD', '--tags', '--abbrev=0',
-            )
-        else:
-            tag_cmd = (
-                *git_cmd, 'describe',
-                'FETCH_HEAD', '--tags', '--exact',
-            )
+            if tags_only:
+                tag_opt = '--abbrev=0'
+            else:
+                tag_opt = '--exact'
+            tag_cmd = (*_git, 'describe', 'FETCH_HEAD', '--tags', tag_opt)
 
-        with tmpdir() as tmp:
             git.init_repo(tmp, self.repo)
+            cmd_output_b(*_git, 'config', 'extensions.partialClone', 'true')
             cmd_output_b(
-                *git_cmd, 'fetch', 'origin', 'HEAD', '--tags',
-                cwd=tmp,
+                *_git, 'fetch', 'origin', 'HEAD',
+                '--quiet', '--filter=blob:none', '--tags',
             )
 
             try:
-                rev = cmd_output(*tag_cmd, cwd=tmp)[1].strip()
+                rev = cmd_output(*tag_cmd)[1].strip()
             except CalledProcessError:
-                cmd = (*git_cmd, 'rev-parse', 'FETCH_HEAD')
-                rev = cmd_output(*cmd, cwd=tmp)[1].strip()
+                rev = cmd_output(*_git, 'rev-parse', 'FETCH_HEAD')[1].strip()
             else:
                 if tags_only:
                     rev = git.get_best_candidate_tag(rev, tmp)
 
             frozen = None
             if freeze:
-                exact_rev_cmd = (*git_cmd, 'rev-parse', rev)
-                exact = cmd_output(*exact_rev_cmd, cwd=tmp)[1].strip()
+                exact = cmd_output(*_git, 'rev-parse', rev)[1].strip()
                 if exact != rev:
                     rev, frozen = exact, rev
-        return self._replace(rev=rev, frozen=frozen)
+
+            try:
+                # workaround for windows -- see #2865
+                cmd_output_b(*_git, 'show', f'{rev}:{C.MANIFEST_FILE}')
+                cmd_output(*_git, 'checkout', rev, '--', C.MANIFEST_FILE)
+            except CalledProcessError:
+                pass  # this will be caught by manifest validating code
+            try:
+                manifest = load_manifest(os.path.join(tmp, C.MANIFEST_FILE))
+            except InvalidManifestError as e:
+                raise RepositoryCannotBeUpdatedError(f'[{self.repo}] {e}')
+            else:
+                hook_ids = frozenset(hook['id'] for hook in manifest)
+
+        return self._replace(rev=rev, frozen=frozen, hook_ids=hook_ids)
 
 
 class RepositoryCannotBeUpdatedError(RuntimeError):
@@ -79,22 +89,28 @@ class RepositoryCannotBeUpdatedError(RuntimeError):
 def _check_hooks_still_exist_at_rev(
         repo_config: dict[str, Any],
         info: RevInfo,
-        store: Store,
 ) -> None:
-    try:
-        path = store.clone(repo_config['repo'], info.rev)
-        manifest = load_manifest(os.path.join(path, C.MANIFEST_FILE))
-    except InvalidManifestError as e:
-        raise RepositoryCannotBeUpdatedError(str(e))
-
     # See if any of our hooks were deleted with the new commits
     hooks = {hook['id'] for hook in repo_config['hooks']}
-    hooks_missing = hooks - {hook['id'] for hook in manifest}
+    hooks_missing = hooks - info.hook_ids
     if hooks_missing:
         raise RepositoryCannotBeUpdatedError(
-            f'Cannot update because the update target is missing these '
-            f'hooks:\n{", ".join(sorted(hooks_missing))}',
+            f'[{info.repo}] Cannot update because the update target is '
+            f'missing these hooks: {", ".join(sorted(hooks_missing))}',
         )
+
+
+def _update_one(
+        i: int,
+        repo: dict[str, Any],
+        *,
+        tags_only: bool,
+        freeze: bool,
+) -> tuple[int, RevInfo, RevInfo]:
+    old = RevInfo.from_config(repo)
+    new = old.update(tags_only=tags_only, freeze=freeze)
+    _check_hooks_still_exist_at_rev(repo, new)
+    return i, old, new
 
 
 REV_LINE_RE = re.compile(r'^(\s+)rev:(\s*)([\'"]?)([^\s#]+)(.*)(\r?\n)$')
@@ -145,49 +161,53 @@ def _write_new_config(path: str, rev_infos: list[RevInfo | None]) -> None:
 
 def autoupdate(
         config_file: str,
-        store: Store,
         tags_only: bool,
         freeze: bool,
         repos: Sequence[str] = (),
+        jobs: int = 1,
 ) -> int:
     """Auto-update the pre-commit config to the latest versions of repos."""
     migrate_config(config_file, quiet=True)
-    retv = 0
-    rev_infos: list[RevInfo | None] = []
     changed = False
+    retv = 0
 
-    config = load_config(config_file)
-    for repo_config in config['repos']:
-        if repo_config['repo'] in {LOCAL, META}:
-            continue
+    config_repos = [
+        repo for repo in load_config(config_file)['repos']
+        if repo['repo'] not in {LOCAL, META}
+    ]
 
-        info = RevInfo.from_config(repo_config)
-        if repos and info.repo not in repos:
-            rev_infos.append(None)
-            continue
-
-        output.write(f'Updating {info.repo} ... ')
-        new_info = info.update(tags_only=tags_only, freeze=freeze)
-        try:
-            _check_hooks_still_exist_at_rev(repo_config, new_info, store)
-        except RepositoryCannotBeUpdatedError as error:
-            output.write_line(error.args[0])
-            rev_infos.append(None)
-            retv = 1
-            continue
-
-        if new_info.rev != info.rev:
-            changed = True
-            if new_info.frozen:
-                updated_to = f'{new_info.frozen} (frozen)'
+    rev_infos: list[RevInfo | None] = [None] * len(config_repos)
+    jobs = jobs or xargs.cpu_count()  # 0 => number of cpus
+    jobs = min(jobs, len(repos) or len(config_repos))  # max 1-per-thread
+    jobs = max(jobs, 1)  # at least one thread
+    with concurrent.futures.ThreadPoolExecutor(jobs) as exe:
+        futures = [
+            exe.submit(
+                _update_one,
+                i, repo, tags_only=tags_only, freeze=freeze,
+            )
+            for i, repo in enumerate(config_repos)
+            if not repos or repo['repo'] in repos
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                i, old, new = future.result()
+            except RepositoryCannotBeUpdatedError as e:
+                output.write_line(str(e))
+                retv = 1
             else:
-                updated_to = new_info.rev
-            msg = f'updating {info.rev} -> {updated_to}.'
-            output.write_line(msg)
-            rev_infos.append(new_info)
-        else:
-            output.write_line('already up to date.')
-            rev_infos.append(None)
+                if new.rev != old.rev:
+                    changed = True
+                    if new.frozen:
+                        new_s = f'{new.frozen} (frozen)'
+                    else:
+                        new_s = new.rev
+                    msg = f'updating {old.rev} -> {new_s}'
+                    rev_infos[i] = new
+                else:
+                    msg = 'already up to date!'
+
+                output.write_line(f'[{old.repo}] {msg}')
 
     if changed:
         _write_new_config(config_file, rev_infos)

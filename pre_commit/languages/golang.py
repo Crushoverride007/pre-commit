@@ -1,58 +1,131 @@
 from __future__ import annotations
 
 import contextlib
+import functools
+import json
 import os.path
+import platform
+import shutil
 import sys
-from typing import Generator
-from typing import Sequence
+import tarfile
+import tempfile
+import urllib.error
+import urllib.request
+import zipfile
+from collections.abc import Generator
+from collections.abc import Sequence
+from typing import ContextManager
+from typing import IO
+from typing import Protocol
 
 import pre_commit.constants as C
-from pre_commit import git
+from pre_commit import lang_base
 from pre_commit.envcontext import envcontext
 from pre_commit.envcontext import PatchesT
 from pre_commit.envcontext import Var
-from pre_commit.hook import Hook
-from pre_commit.languages import helpers
+from pre_commit.git import no_git_env
 from pre_commit.prefix import Prefix
-from pre_commit.util import clean_path_on_failure
 from pre_commit.util import cmd_output
-from pre_commit.util import cmd_output_b
 from pre_commit.util import rmtree
 
 ENVIRONMENT_DIR = 'golangenv'
-get_default_version = helpers.basic_get_default_version
-health_check = helpers.basic_health_check
+health_check = lang_base.basic_health_check
+run_hook = lang_base.basic_run_hook
+
+_ARCH_ALIASES = {
+    'x86_64': 'amd64',
+    'i386': '386',
+    'aarch64': 'arm64',
+    'armv8': 'arm64',
+    'armv7l': 'armv6l',
+}
+_ARCH = platform.machine().lower()
+_ARCH = _ARCH_ALIASES.get(_ARCH, _ARCH)
 
 
-def get_env_patch(venv: str) -> PatchesT:
+class ExtractAll(Protocol):
+    def extractall(self, path: str) -> None: ...
+
+
+if sys.platform == 'win32':  # pragma: win32 cover
+    _EXT = 'zip'
+
+    def _open_archive(bio: IO[bytes]) -> ContextManager[ExtractAll]:
+        return zipfile.ZipFile(bio)
+else:  # pragma: win32 no cover
+    _EXT = 'tar.gz'
+
+    def _open_archive(bio: IO[bytes]) -> ContextManager[ExtractAll]:
+        return tarfile.open(fileobj=bio)
+
+
+@functools.lru_cache(maxsize=1)
+def get_default_version() -> str:
+    if lang_base.exe_exists('go'):
+        return 'system'
+    else:
+        return C.DEFAULT
+
+
+def get_env_patch(venv: str, version: str) -> PatchesT:
+    if version == 'system':
+        return (
+            ('PATH', (os.path.join(venv, 'bin'), os.pathsep, Var('PATH'))),
+        )
+
     return (
-        ('PATH', (os.path.join(venv, 'bin'), os.pathsep, Var('PATH'))),
+        ('GOROOT', os.path.join(venv, '.go')),
+        ('GOTOOLCHAIN', 'local'),
+        (
+            'PATH', (
+                os.path.join(venv, 'bin'), os.pathsep,
+                os.path.join(venv, '.go', 'bin'), os.pathsep, Var('PATH'),
+            ),
+        ),
     )
+
+
+@functools.lru_cache
+def _infer_go_version(version: str) -> str:
+    if version != C.DEFAULT:
+        return version
+    resp = urllib.request.urlopen('https://go.dev/dl/?mode=json')
+    # TODO: 3.9+ .removeprefix('go')
+    return json.load(resp)[0]['version'][2:]
+
+
+def _get_url(version: str) -> str:
+    os_name = platform.system().lower()
+    version = _infer_go_version(version)
+    return f'https://dl.google.com/go/go{version}.{os_name}-{_ARCH}.{_EXT}'
+
+
+def _install_go(version: str, dest: str) -> None:
+    try:
+        resp = urllib.request.urlopen(_get_url(version))
+    except urllib.error.HTTPError as e:  # pragma: no cover
+        if e.code == 404:
+            raise ValueError(
+                f'Could not find a version matching your system requirements '
+                f'(os={platform.system().lower()}; arch={_ARCH})',
+            ) from e
+        else:
+            raise
+    else:
+        with tempfile.TemporaryFile() as f:
+            shutil.copyfileobj(resp, f)
+            f.seek(0)
+
+            with _open_archive(f) as archive:
+                archive.extractall(dest)
+        shutil.move(os.path.join(dest, 'go'), os.path.join(dest, '.go'))
 
 
 @contextlib.contextmanager
-def in_env(prefix: Prefix) -> Generator[None, None, None]:
-    envdir = prefix.path(
-        helpers.environment_dir(ENVIRONMENT_DIR, C.DEFAULT),
-    )
-    with envcontext(get_env_patch(envdir)):
+def in_env(prefix: Prefix, version: str) -> Generator[None]:
+    envdir = lang_base.environment_dir(prefix, ENVIRONMENT_DIR, version)
+    with envcontext(get_env_patch(envdir, version)):
         yield
-
-
-def guess_go_dir(remote_url: str) -> str:
-    if remote_url.endswith('.git'):
-        remote_url = remote_url[:-1 * len('.git')]
-    looks_like_url = (
-        not remote_url.startswith('file://') and
-        ('//' in remote_url or '@' in remote_url)
-    )
-    remote_url = remote_url.replace(':', '/')
-    if looks_like_url:
-        _, _, remote_url = remote_url.rpartition('//')
-        _, _, remote_url = remote_url.rpartition('@')
-        return remote_url
-    else:
-        return 'unknown_src_dir'
 
 
 def install_environment(
@@ -60,42 +133,30 @@ def install_environment(
         version: str,
         additional_dependencies: Sequence[str],
 ) -> None:
-    helpers.assert_version_default('golang', version)
-    directory = prefix.path(
-        helpers.environment_dir(ENVIRONMENT_DIR, C.DEFAULT),
-    )
+    env_dir = lang_base.environment_dir(prefix, ENVIRONMENT_DIR, version)
 
-    with clean_path_on_failure(directory):
-        remote = git.get_remote_url(prefix.prefix_dir)
-        repo_src_dir = os.path.join(directory, 'src', guess_go_dir(remote))
+    if version != 'system':
+        _install_go(version, env_dir)
 
-        # Clone into the goenv we'll create
-        cmd = ('git', 'clone', '--recursive', '.', repo_src_dir)
-        helpers.run_setup_cmd(prefix, cmd)
+    if sys.platform == 'cygwin':  # pragma: no cover
+        gopath = cmd_output('cygpath', '-w', env_dir)[1].strip()
+    else:
+        gopath = env_dir
 
-        if sys.platform == 'cygwin':  # pragma: no cover
-            _, gopath, _ = cmd_output('cygpath', '-w', directory)
-            gopath = gopath.strip()
-        else:
-            gopath = directory
-        env = dict(os.environ, GOPATH=gopath)
-        env.pop('GOBIN', None)
-        cmd_output_b('go', 'install', './...', cwd=repo_src_dir, env=env)
-        for dependency in additional_dependencies:
-            cmd_output_b(
-                'go', 'install', dependency, cwd=repo_src_dir, env=env,
-            )
-        # Same some disk space, we don't need these after installation
-        rmtree(prefix.path(directory, 'src'))
-        pkgdir = prefix.path(directory, 'pkg')
-        if os.path.exists(pkgdir):  # pragma: no cover (go<1.10)
-            rmtree(pkgdir)
+    env = no_git_env(dict(os.environ, GOPATH=gopath))
+    env.pop('GOBIN', None)
+    if version != 'system':
+        env['GOTOOLCHAIN'] = 'local'
+        env['GOROOT'] = os.path.join(env_dir, '.go')
+        env['PATH'] = os.pathsep.join((
+            os.path.join(env_dir, '.go', 'bin'), os.environ['PATH'],
+        ))
 
+    lang_base.setup_cmd(prefix, ('go', 'install', './...'), env=env)
+    for dependency in additional_dependencies:
+        lang_base.setup_cmd(prefix, ('go', 'install', dependency), env=env)
 
-def run_hook(
-        hook: Hook,
-        file_args: Sequence[str],
-        color: bool,
-) -> tuple[int, bytes]:
-    with in_env(hook.prefix):
-        return helpers.run_xargs(hook, hook.cmd, file_args, color=color)
+    # save some disk space -- we don't need this after installation
+    pkgdir = os.path.join(env_dir, 'pkg')
+    if os.path.exists(pkgdir):  # pragma: no branch (always true on windows?)
+        rmtree(pkgdir)

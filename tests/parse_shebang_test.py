@@ -75,10 +75,10 @@ def test_find_executable_path_ext(in_tmpdir):
     env_path = {'PATH': os.path.dirname(exe_path)}
     env_path_ext = dict(env_path, PATHEXT=os.pathsep.join(('.exe', '.myext')))
     assert parse_shebang.find_executable('run') is None
-    assert parse_shebang.find_executable('run', _environ=env_path) is None
-    ret = parse_shebang.find_executable('run.myext', _environ=env_path)
+    assert parse_shebang.find_executable('run', env=env_path) is None
+    ret = parse_shebang.find_executable('run.myext', env=env_path)
     assert ret == exe_path
-    ret = parse_shebang.find_executable('run', _environ=env_path_ext)
+    ret = parse_shebang.find_executable('run', env=env_path_ext)
     assert ret == exe_path
 
 
@@ -94,7 +94,7 @@ def test_normexe_does_not_exist_sep():
     assert excinfo.value.args == ('Executable `./i-dont-exist-lol` not found',)
 
 
-@pytest.mark.xfail(os.name == 'nt', reason='posix only')
+@pytest.mark.xfail(sys.platform == 'win32', reason='posix only')
 def test_normexe_not_executable(tmpdir):  # pragma: win32 no cover
     tmpdir.join('exe').ensure()
     with tmpdir.as_cwd(), pytest.raises(OSError) as excinfo:
@@ -133,17 +133,17 @@ def test_normalize_cmd_PATH():
 
 
 def test_normalize_cmd_shebang(in_tmpdir):
-    echo = _echo_exe().replace(os.sep, '/')
-    path = write_executable(echo)
-    assert parse_shebang.normalize_cmd((path,)) == (echo, path)
+    us = sys.executable.replace(os.sep, '/')
+    path = write_executable(us)
+    assert parse_shebang.normalize_cmd((path,)) == (us, path)
 
 
 def test_normalize_cmd_PATH_shebang_full_path(in_tmpdir):
-    echo = _echo_exe().replace(os.sep, '/')
-    path = write_executable(echo)
+    us = sys.executable.replace(os.sep, '/')
+    path = write_executable(us)
     with bin_on_path():
         ret = parse_shebang.normalize_cmd(('run',))
-        assert ret == (echo, os.path.abspath(path))
+        assert ret == (us, os.path.abspath(path))
 
 
 def test_normalize_cmd_PATH_shebang_PATH(in_tmpdir):

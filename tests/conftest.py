@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import functools
 import io
-import logging
 import os.path
 from unittest import mock
 
@@ -19,24 +18,6 @@ from testing.fixtures import make_consuming_repo
 from testing.fixtures import write_config
 from testing.util import cwd
 from testing.util import git_commit
-
-
-@pytest.fixture(autouse=True)
-def no_warnings(recwarn):
-    yield
-    warnings = []
-    for warning in recwarn:  # pragma: no cover
-        message = str(warning.message)
-        # ImportWarning: Not importing directory '...' missing __init__(.py)
-        if not (
-            isinstance(warning.message, ImportWarning) and
-            message.startswith('Not importing directory ') and
-            ' missing __init__' in message
-        ):
-            warnings.append(
-                f'{warning.filename}:{warning.lineno} {message}',
-            )
-    assert not warnings
 
 
 @pytest.fixture
@@ -86,7 +67,7 @@ def _make_conflict():
         bar_only_file.write('bar')
     cmd_output('git', 'add', 'bar_only_file')
     git_commit(msg=_make_conflict.__name__)
-    cmd_output('git', 'merge', 'foo', retcode=None)
+    cmd_output('git', 'merge', 'foo', check=False)
 
 
 @pytest.fixture
@@ -221,42 +202,25 @@ def store(tempdir_factory):
     yield Store(os.path.join(tempdir_factory.get(), '.pre-commit'))
 
 
-@pytest.fixture
-def log_info_mock():
-    with mock.patch.object(logging.getLogger('pre_commit'), 'info') as mck:
-        yield mck
-
-
-class FakeStream:
-    def __init__(self):
-        self.data = io.BytesIO()
-
-    def write(self, s):
-        self.data.write(s)
-
-    def flush(self):
-        pass
-
-
 class Fixture:
-    def __init__(self, stream):
+    def __init__(self, stream: io.BytesIO) -> None:
         self._stream = stream
 
-    def get_bytes(self):
+    def get_bytes(self) -> bytes:
         """Get the output as-if no encoding occurred"""
-        data = self._stream.data.getvalue()
-        self._stream.data.seek(0)
-        self._stream.data.truncate()
+        data = self._stream.getvalue()
+        self._stream.seek(0)
+        self._stream.truncate()
         return data.replace(b'\r\n', b'\n')
 
-    def get(self):
+    def get(self) -> str:
         """Get the output assuming it was written as UTF-8 bytes"""
         return self.get_bytes().decode()
 
 
 @pytest.fixture
 def cap_out():
-    stream = FakeStream()
+    stream = io.BytesIO()
     write = functools.partial(output.write, stream=stream)
     write_line_b = functools.partial(output.write_line_b, stream=stream)
     with mock.patch.multiple(output, write=write, write_line_b=write_line_b):

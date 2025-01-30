@@ -2,23 +2,25 @@ from __future__ import annotations
 
 import contextlib
 import os.path
-from typing import Generator
-from typing import Sequence
+import re
+import tempfile
+import xml.etree.ElementTree
+import zipfile
+from collections.abc import Generator
+from collections.abc import Sequence
 
-import pre_commit.constants as C
+from pre_commit import lang_base
 from pre_commit.envcontext import envcontext
 from pre_commit.envcontext import PatchesT
 from pre_commit.envcontext import Var
-from pre_commit.hook import Hook
-from pre_commit.languages import helpers
 from pre_commit.prefix import Prefix
-from pre_commit.util import clean_path_on_failure
 
 ENVIRONMENT_DIR = 'dotnetenv'
 BIN_DIR = 'bin'
 
-get_default_version = helpers.basic_get_default_version
-health_check = helpers.basic_health_check
+get_default_version = lang_base.basic_get_default_version
+health_check = lang_base.basic_health_check
+run_hook = lang_base.basic_run_hook
 
 
 def get_env_patch(venv: str) -> PatchesT:
@@ -28,11 +30,26 @@ def get_env_patch(venv: str) -> PatchesT:
 
 
 @contextlib.contextmanager
-def in_env(prefix: Prefix) -> Generator[None, None, None]:
-    directory = helpers.environment_dir(ENVIRONMENT_DIR, C.DEFAULT)
-    envdir = prefix.path(directory)
+def in_env(prefix: Prefix, version: str) -> Generator[None]:
+    envdir = lang_base.environment_dir(prefix, ENVIRONMENT_DIR, version)
     with envcontext(get_env_patch(envdir)):
         yield
+
+
+@contextlib.contextmanager
+def _nuget_config_no_sources() -> Generator[str]:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        nuget_config = os.path.join(tmpdir, 'nuget.config')
+        with open(nuget_config, 'w') as f:
+            f.write(
+                '<?xml version="1.0" encoding="utf-8"?>'
+                '<configuration>'
+                '  <packageSources>'
+                '    <clear />'
+                '  </packageSources>'
+                '</configuration>',
+            )
+        yield nuget_config
 
 
 def install_environment(
@@ -40,48 +57,55 @@ def install_environment(
         version: str,
         additional_dependencies: Sequence[str],
 ) -> None:
-    helpers.assert_version_default('dotnet', version)
-    helpers.assert_no_additional_deps('dotnet', additional_dependencies)
+    lang_base.assert_version_default('dotnet', version)
+    lang_base.assert_no_additional_deps('dotnet', additional_dependencies)
 
-    envdir = prefix.path(helpers.environment_dir(ENVIRONMENT_DIR, version))
-    with clean_path_on_failure(envdir):
-        build_dir = 'pre-commit-build'
+    envdir = lang_base.environment_dir(prefix, ENVIRONMENT_DIR, version)
+    build_dir = prefix.path('pre-commit-build')
 
-        # Build & pack nupkg file
-        helpers.run_setup_cmd(
-            prefix,
-            (
-                'dotnet', 'pack',
-                '--configuration', 'Release',
-                '--output', build_dir,
-            ),
-        )
+    # Build & pack nupkg file
+    lang_base.setup_cmd(
+        prefix,
+        (
+            'dotnet', 'pack',
+            '--configuration', 'Release',
+            '--property', f'PackageOutputPath={build_dir}',
+        ),
+    )
 
-        # Determine tool from the packaged file <tool_name>.<version>.nupkg
-        build_outputs = os.listdir(os.path.join(prefix.prefix_dir, build_dir))
-        for output in build_outputs:
-            tool_name = output.split('.')[0]
+    nupkg_dir = prefix.path(build_dir)
+    nupkgs = [x for x in os.listdir(nupkg_dir) if x.endswith('.nupkg')]
 
-            # Install to bin dir
-            helpers.run_setup_cmd(
+    if not nupkgs:
+        raise AssertionError('could not find any build outputs to install')
+
+    for nupkg in nupkgs:
+        with zipfile.ZipFile(os.path.join(nupkg_dir, nupkg)) as f:
+            nuspec, = (x for x in f.namelist() if x.endswith('.nuspec'))
+            with f.open(nuspec) as spec:
+                tree = xml.etree.ElementTree.parse(spec)
+
+        namespace = re.match(r'{.*}', tree.getroot().tag)
+        if not namespace:
+            raise AssertionError('could not parse namespace from nuspec')
+
+        tool_id_element = tree.find(f'.//{namespace[0]}id')
+        if tool_id_element is None:
+            raise AssertionError('expected to find an "id" element')
+
+        tool_id = tool_id_element.text
+        if not tool_id:
+            raise AssertionError('"id" element missing tool name')
+
+        # Install to bin dir
+        with _nuget_config_no_sources() as nuget_config:
+            lang_base.setup_cmd(
                 prefix,
                 (
                     'dotnet', 'tool', 'install',
+                    '--configfile', nuget_config,
                     '--tool-path', os.path.join(envdir, BIN_DIR),
                     '--add-source', build_dir,
-                    tool_name,
+                    tool_id,
                 ),
             )
-
-        # Clean the git dir, ignoring the environment dir
-        clean_cmd = ('git', 'clean', '-ffxd', '-e', f'{ENVIRONMENT_DIR}-*')
-        helpers.run_setup_cmd(prefix, clean_cmd)
-
-
-def run_hook(
-        hook: Hook,
-        file_args: Sequence[str],
-        color: bool,
-) -> tuple[int, bytes]:
-    with in_env(hook.prefix):
-        return helpers.run_xargs(hook, hook.cmd, file_args, color=color)

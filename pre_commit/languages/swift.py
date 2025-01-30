@@ -2,24 +2,23 @@ from __future__ import annotations
 
 import contextlib
 import os
-from typing import Generator
-from typing import Sequence
+from collections.abc import Generator
+from collections.abc import Sequence
 
-import pre_commit.constants as C
+from pre_commit import lang_base
 from pre_commit.envcontext import envcontext
 from pre_commit.envcontext import PatchesT
 from pre_commit.envcontext import Var
-from pre_commit.hook import Hook
-from pre_commit.languages import helpers
 from pre_commit.prefix import Prefix
-from pre_commit.util import clean_path_on_failure
 from pre_commit.util import cmd_output_b
 
-ENVIRONMENT_DIR = 'swift_env'
-get_default_version = helpers.basic_get_default_version
-health_check = helpers.basic_health_check
 BUILD_DIR = '.build'
 BUILD_CONFIG = 'release'
+
+ENVIRONMENT_DIR = 'swift_env'
+get_default_version = lang_base.basic_get_default_version
+health_check = lang_base.basic_health_check
+run_hook = lang_base.basic_run_hook
 
 
 def get_env_patch(venv: str) -> PatchesT:  # pragma: win32 no cover
@@ -28,10 +27,8 @@ def get_env_patch(venv: str) -> PatchesT:  # pragma: win32 no cover
 
 
 @contextlib.contextmanager  # pragma: win32 no cover
-def in_env(prefix: Prefix) -> Generator[None, None, None]:
-    envdir = prefix.path(
-        helpers.environment_dir(ENVIRONMENT_DIR, C.DEFAULT),
-    )
+def in_env(prefix: Prefix, version: str) -> Generator[None]:
+    envdir = lang_base.environment_dir(prefix, ENVIRONMENT_DIR, version)
     with envcontext(get_env_patch(envdir)):
         yield
 
@@ -39,27 +36,15 @@ def in_env(prefix: Prefix) -> Generator[None, None, None]:
 def install_environment(
         prefix: Prefix, version: str, additional_dependencies: Sequence[str],
 ) -> None:  # pragma: win32 no cover
-    helpers.assert_version_default('swift', version)
-    helpers.assert_no_additional_deps('swift', additional_dependencies)
-    directory = prefix.path(
-        helpers.environment_dir(ENVIRONMENT_DIR, C.DEFAULT),
-    )
+    lang_base.assert_version_default('swift', version)
+    lang_base.assert_no_additional_deps('swift', additional_dependencies)
+    envdir = lang_base.environment_dir(prefix, ENVIRONMENT_DIR, version)
 
     # Build the swift package
-    with clean_path_on_failure(directory):
-        os.mkdir(directory)
-        cmd_output_b(
-            'swift', 'build',
-            '-C', prefix.prefix_dir,
-            '-c', BUILD_CONFIG,
-            '--build-path', os.path.join(directory, BUILD_DIR),
-        )
-
-
-def run_hook(
-        hook: Hook,
-        file_args: Sequence[str],
-        color: bool,
-) -> tuple[int, bytes]:  # pragma: win32 no cover
-    with in_env(hook.prefix):
-        return helpers.run_xargs(hook, hook.cmd, file_args, color=color)
+    os.mkdir(envdir)
+    cmd_output_b(
+        'swift', 'build',
+        '--package-path', prefix.prefix_dir,
+        '-c', BUILD_CONFIG,
+        '--build-path', os.path.join(envdir, BUILD_DIR),
+    )
